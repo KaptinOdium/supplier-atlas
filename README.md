@@ -12,7 +12,7 @@ The map uses supplier coordinates or approximate city locations from the bundled
 
 The application requires an active Atlas account to load supplier records. The repository contains the browser application and public geographic data.
 
-GitHub Pages requires a plan that supports publishing from a private repository. On a supported plan, choose **Deploy from a branch** in **Settings → Pages**, then select **main** and **/docs**. GitHub displays the site URL after deployment.
+GitHub Pages serves the `docs/` folder on `main`. [Open Supplier Atlas](https://kaptinodium.github.io/supplier-atlas/) and sign in with your Atlas account.
 
 To open Atlas locally, run `python -m http.server 8000 --bind 127.0.0.1 --directory docs` from the repository root and open [Supplier Atlas on this computer](http://127.0.0.1:8000/). Sign in with your existing Atlas account.
 
