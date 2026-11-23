@@ -1,0 +1,41 @@
+name: Refresh public operational risks
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 6,12,18 * * *'
+  push:
+    branches: [main]
+    paths:
+      - scripts/collect_operational_risks.py
+      - .github/workflows/operational-risks.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-public-operational-risks
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Check public feed rules
+        run: python3 -m unittest discover -s scripts
+      - name: Collect public index and regulator evidence
+        run: python3 scripts/collect_operational_risks.py
+      - name: Save the public feed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- docs/data/operational-risks.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Refresh public operational risk reports"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi

@@ -80,6 +80,19 @@ test('failed reads are distinct from a successful zero-result scan', async () =>
   await assert.rejects(loadHazardLeads([], {fetcher:async()=>({ok:true,json:async()=>({})})}), /unsupported/);
 });
 
+test('published transport and cyber type codes require operational evidence; a cyber headline cannot flag an entire city',async()=>{
+  const ops = (id,type,title)=>({...incident,id,type,title});
+  const {matches}=await run([
+    ops(10,'rail-accident','Freight rail line blocked in York'),ops(11,'maritime','Cargo terminal closed in York'),
+    ops(12,'cyber-attack','Example Parts suspends production after systems outage in York'),
+    ops(13,'rail-accident','Injured passenger in York'),ops(14,'cyber-attack','Security conference in York'),
+    ops(15,'mine-accident','Landmine blast in York')
+  ],[supplier,{...supplier,name:'Different Company'}]);
+  assert.deepEqual(matches.map(m=>[m.event.id,m.event.category]),[
+    ['git-10','logistics'],['git-10','logistics'],['git-11','logistics'],['git-11','logistics'],['git-12','cyber']
+  ]);
+});
+
 test('coalesces and caches public reads but rematches each list and preserves the original retrieval time', async () => {
   let calls = 0;
   const fetcher = async () => {

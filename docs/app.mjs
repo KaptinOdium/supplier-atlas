@@ -1,23 +1,26 @@
 import {norm,parseSuppliers,csvExport,point} from './core.mjs';
 import {AuthClient,configured,AccessError,ConflictError} from './auth-core.mjs?v=20261118-1';
 import {setIdentity} from './auth-state.mjs';
-import {createSupplierMap} from './map-view.mjs?v=20261118-2';
+import {createSupplierMap} from './map-view.mjs?v=20261123-1';
 const $=id=>document.getElementById(id),NS='http://www.w3.org/2000/svg';let lastLookupAt=0;let rows=[],world=[],cities=[],cityIndex=new Map(),countryIndex=new Map(),cache=new Map(),selected=null,busy=false,cancel=false,view=[0,0,1000,500];
 let auth=null,identity=null,revision=0,dirty=false,saving=false,loading=false,loaded=false,epoch=0,checking=false,lookupAbort=null;
 let detailMap=null,detailReady=false,mapAttempt=0,mapAbort=null;
-import {createScreeningPanel} from './screening-panel.mjs?v=20261118-3';
+import {createScreeningPanel} from './screening-panel.mjs?v=20261123-1';
 import {readPrivateRegister} from './screen-register.mjs';
-import {loadHazardLeads} from './screen-hazards.mjs';
-import {loadGdacs} from './screen-gdacs.mjs';
+import {loadHazardLeads} from './screen-hazards.mjs?v=20261123-1';
+import {loadGdacs} from './screen-gdacs.mjs?v=20261123-1';
+import {loadOperationalLeads} from './screen-operations.mjs';
 import {projectAssessment} from './screen-policy.mjs';
 import {matchSuppliers} from './screen-matches.mjs?v=20261118-3';
-let signalsById = new Map();
+let signalsById = new Map(), screeningState = 'idle', registerPage = 0;
+const registerPageSize = 1000;
+const onlyFlagged = $('onlyFlagged');
 const signalColors = {red:'#c53735', yellow:'#f5c542', neutral:'#64748b'};
 const signalLabels = {red:'Active site incident', yellow:'Needs review', neutral:'Other supplier'};
 const levelOrder = {red:2, yellow:1, neutral:0};
 const screeningPanel = createScreeningPanel({
   document, readPrivateRegister, matchSuppliers, countryCode:getCode,
-  loadHazardLeads, loadGdacs, projectAssessment, canReadProject: () => identity?.role === 'owner',
+  loadHazardLeads, loadGdacs, loadOperationalLeads, projectAssessment, canReadProject: () => identity?.role === 'owner',
   onSignals: updateSignals, onShowMap: focusSupplier,
   loadProject: () => identity?.role === 'owner' ? auth.loadScreeningRegister() : null
 });
@@ -25,7 +28,7 @@ const canEdit=()=>identity&&['owner','editor'].includes(identity.role);
 function controls(){updatePreviousExport();screeningPanel.setRows(identity && loaded && !loading ? rows : null);for(const node of document.querySelectorAll('[data-edit]'))node.disabled=!canEdit()||saving||loading||busy||!loaded;$('reloadButton').disabled=!identity||saving||loading||busy;$('exportButton').disabled=!identity||loading;$('saveButton').disabled=!canEdit()||saving||loading||busy||!dirty||!loaded;$('roleNote').textContent=identity?.role==='viewer'?'View-only access':'';$('saveState').textContent=loading?'Loading shared list…':saving?'Saving shared list…':!loaded?'Shared list has not loaded. Reload to try again.':dirty?'Unsaved changes — save to share with your team.':'Shared list is up to date.';$('saveState').classList.toggle('unsaved',dirty);}
 function changed(){dirty=true;controls();}
 function editable(){if(!canEdit()||saving||loading||busy||!loaded){notice('Editing is unavailable while viewing or processing the shared list.',true);return false;}return true;}
-function lock(message='Sign in with your invited account.'){epoch++;screeningPanel.reset();stopDetailedMap();cancel=true;lookupAbort?.abort();lookupAbort=null;identity=null;setIdentity(null);rows=[];cache.clear();selected=null;dirty=false;loading=false;loaded=false;saving=false;busy=false;revision=0;$('cancelButton').hidden=true;$('pasteInput').value='';$('fileInput').value='';$('search').value='';$('lookupConsent').checked=false;$('mapPopup').hidden=true;$('mapPopup').replaceChildren();notice('Sign in to access your supplier list.');if($('editDialog').open)$('editDialog').close();$('editName').textContent='';$('editLocation').textContent='';$('editLat').value='';$('editLon').value='';$('candidateList').replaceChildren();$('workspaceMain').hidden=true;$('authGate').hidden=false;$('accountInfo').hidden=true;$('accountInfo').textContent='';$('logoutButton').hidden=true;$('authNotice').textContent=message;render();controls();}
+function lock(message='Sign in with your invited account.'){epoch++;onlyFlagged.checked=true;registerPage=0;screeningPanel.reset();stopDetailedMap();cancel=true;lookupAbort?.abort();lookupAbort=null;identity=null;setIdentity(null);rows=[];cache.clear();selected=null;dirty=false;loading=false;loaded=false;saving=false;busy=false;revision=0;$('cancelButton').hidden=true;$('pasteInput').value='';$('fileInput').value='';$('search').value='';$('lookupConsent').checked=false;$('mapPopup').hidden=true;$('mapPopup').replaceChildren();notice('Sign in to access your supplier list.');if($('editDialog').open)$('editDialog').close();$('editName').textContent='';$('editLocation').textContent='';$('editLat').value='';$('editLon').value='';$('candidateList').replaceChildren();$('workspaceMain').hidden=true;$('authGate').hidden=false;$('accountInfo').hidden=true;$('accountInfo').textContent='';$('logoutButton').hidden=true;$('authNotice').textContent=message;render();controls();}
 async function failAccess(error){if(error instanceof AccessError){lock(error.message);await auth?.signOut();return true;}return false;}
 function safeRows(input){if(!Array.isArray(input)||input.length>10000)throw Error('The shared supplier list is invalid.');const text=v=>typeof v==='string'?v:'';return input.map((r,i)=>{if(!r||typeof r!=='object'||Array.isArray(r))throw Error('The shared supplier list contains an invalid row.');const valid=Number.isFinite(r.lat)&&Number.isFinite(r.lon)&&Math.abs(r.lat)<=90&&Math.abs(r.lon)<=180;return {id:'s'+(i+1),name:text(r.name),duns:text(r.duns),country:text(r.country),city:text(r.city),lat:valid?r.lat:null,lon:valid?r.lon:null,precision:valid?(r.precision==='Approximate city'?'Approximate city':'Provided coordinates'):text(r.precision)||'Unresolved',source:text(r.source),warnings:Array.isArray(r.warnings)?r.warnings.filter(x=>typeof x==='string'):[],candidates:Array.isArray(r.candidates)?r.candidates.filter(c=>c&&Number.isFinite(c.lat)&&Number.isFinite(c.lon)&&Math.abs(c.lat)<=90&&Math.abs(c.lon)<=180).map(c=>({lat:c.lat,lon:c.lon,label:text(c.label),source:text(c.source)})):[]};});}
 async function loadShared(){if(!identity||loading||saving||busy)return;if(dirty&&!confirm('Discard unsaved changes and load the latest shared list?'))return;const requestEpoch=epoch;loading=true;controls();try{const data=await auth.loadShared();if(requestEpoch!==epoch)return;if(!Number.isSafeInteger(data.revision)||data.revision<0)throw Error('The shared list revision is invalid.');rows=safeRows(data.suppliers);revision=data.revision;loaded=true;dirty=false;$('mapPopup').hidden=true;render();fit();notice('Loaded '+rows.length+' suppliers from your private shared workspace.');}catch(e){if(requestEpoch!==epoch)return;if(!await failAccess(e))notice(e.message,true);}finally{if(requestEpoch===epoch){loading=false;controls();}}}
@@ -67,25 +70,103 @@ function buildIndex(){for(const c of world){for(const n of [c.name,c.iso2,c.iso3
 }
 function offlineMatch(r){if(hasPoint(r))return;const code=getCode(r.country);if(!code)return;const matches=cityIndex.get(code+'|'+norm(r.city))||[];const unique=[...new Map(matches.map(c=>[c[3]+','+c[4],c])).values()];r.candidates=unique.map(c=>({lat:c[3],lon:c[4],label:`${c[0]} · ${c[5]} · region ${c[6]}`,source:'GeoNames cities15000'}));if(unique.length===1)chooseCandidate(r,r.candidates[0]);else if(unique.length>1)r.precision='Ambiguous city';}
 function chooseCandidate(r,c){r.lat=Number(c.lat);r.lon=Number(c.lon);r.precision='Approximate city';r.source=c.source||'OpenStreetMap Nominatim';r.candidates=[];r.warnings=r.warnings.filter(w=>w!=='Invalid coordinates');}
-function filtered(){const q=norm($('search').value),country=$('countryFilter').value,status=$('statusFilter').value;return rows.filter(r=>(!q||norm([r.name,r.duns,r.country,r.city].join(' ')).includes(q))&&(!country||r.country===country)&&(!status||(status==='mapped'?hasPoint(r):status==='warnings'?r.warnings.length:!hasPoint(r))));}
-function render(){const mapped=rows.filter(hasPoint);$('countAll').textContent=rows.length.toLocaleString();$('countMapped').textContent=mapped.length.toLocaleString();$('countCountries').textContent=new Set(rows.map(r=>getCode(r.country)||norm(r.country)).filter(Boolean)).size;$('countReview').textContent=rows.length-mapped.length;const old=$('countryFilter').value;$('countryFilter').replaceChildren(new Option('All countries',''));[...new Set(rows.map(r=>r.country).filter(Boolean))].sort().forEach(c=>$('countryFilter').add(new Option(c,c)));$('countryFilter').value=old;$('mapTitle').textContent='Supplier locations';$('emptyMap').hidden=rows.length>0;renderTable();renderDots();}
-function renderTable(){const list=filtered(),body=$('tableBody');body.replaceChildren();$('emptyTable').hidden=list.length>0;$('emptyTable').textContent=rows.length?'No suppliers match the current filters.':'Your imported suppliers will appear here.';for(const r of list.slice(0,1000)){const tr=el('tr'),a=el('td');a.append(el('b',r.name||'Unnamed supplier'),el('small',r.duns||'No DUNS'));const b=el('td',r.city||'No city');b.append(el('small',r.country||'No country'));const c=el('td');c.append(el('span',r.precision,'badge '+(hasPoint(r)?r.precision==='Approximate city'?'':'blue':'warn')));if(hasPoint(r))c.append(el('small',`${r.lat.toFixed(4)}, ${r.lon.toFixed(4)}`));const d=el('td');d.append(el('small',r.warnings.length?r.warnings.join(' · '):hasPoint(r)?r.source:'Location not resolved'));const e=el('td'),btn=el('button','Review','quiet');if(hasPoint(r)){const show=el('button','Show on map','quiet smallbtn');show.onclick=()=>focusSupplier(r);e.append(show);} btn.setAttribute('data-edit','');btn.disabled=!canEdit()||saving||loading||busy||!loaded;btn.onclick=()=>edit(r.id);e.append(btn);tr.append(a,b,c,d,e);body.append(tr);}$('rowCount').textContent=`${list.length.toLocaleString()} ${list.length===1?'row':'rows'}${list.length>1000?' · first 1,000 shown; export contains all filtered rows':''}`;}
+function displayRows() {
+  return onlyFlagged.checked ? rows.filter(row => signalsById.has(row.id)) : rows;
+}
+function signalEmptyMessage() {
+  switch (screeningState) {
+    case 'scanning': return 'Scanning suppliers for signals…';
+    case 'unavailable': return 'Screening sources are unavailable.';
+    case 'partial': return 'No yellow or red signals in the sources checked. Coverage is partial.';
+    case 'complete': return 'No yellow or red signals in the sources checked.';
+    default: return 'Waiting for supplier screening.';
+  }
+}
+function filtered(){const q=norm($('search').value),country=$('countryFilter').value,status=$('statusFilter').value;return displayRows().filter(r=>(!q||norm([r.name,r.duns,r.country,r.city].join(' ')).includes(q))&&(!country||r.country===country)&&(!status||(status==='mapped'?hasPoint(r):status==='warnings'?r.warnings.length:!hasPoint(r))));}
+function render(){const mapped=rows.filter(hasPoint);$('countAll').textContent=rows.length.toLocaleString();$('countMapped').textContent=mapped.length.toLocaleString();$('countCountries').textContent=new Set(rows.map(r=>getCode(r.country)||norm(r.country)).filter(Boolean)).size;$('countReview').textContent=rows.length-mapped.length;const old=$('countryFilter').value;$('countryFilter').replaceChildren(new Option('All countries',''));[...new Set(rows.map(r=>r.country).filter(Boolean))].sort().forEach(c=>$('countryFilter').add(new Option(c,c)));$('countryFilter').value=old;$('mapTitle').textContent='Supplier locations';renderTable();renderDots();}
+function renderTable() {
+  const list=filtered(), body=$('tableBody'), empty=$('emptyTable');
+  body.replaceChildren();
+  empty.hidden=list.length>0;
+  empty.textContent=!rows.length?'Your imported suppliers will appear here.':
+    onlyFlagged.checked && !signalsById.size?signalEmptyMessage():'No suppliers match the current filters.';
+  const pageCount=Math.ceil(list.length/registerPageSize);
+  registerPage=Math.min(registerPage,Math.max(0,pageCount-1));
+  const start=registerPage*registerPageSize, page=list.slice(start,start+registerPageSize);
+  for (const row of page) {
+    const tr=el('tr'), supplier=el('td');
+    supplier.append(el('b',row.name||'Unnamed supplier'),el('small',row.duns||'No DUNS'));
+    const level=signalsById.get(row.id);
+    if (level) {
+      const status=el('small'), dot=el('i',undefined,'dot signal-'+level);
+      dot.setAttribute('aria-hidden','true');
+      status.append(dot,el('span',' '+signalLabels[level]));
+      supplier.append(status);
+    }
+    const location=el('td',row.city||'No city');
+    location.append(el('small',row.country||'No country'));
+    const mapped=hasPoint(row), precision=el('td');
+    const badge=mapped?(row.precision==='Approximate city'?'':'blue'):'warn';
+    precision.append(el('span',row.precision,'badge '+badge));
+    if (mapped) precision.append(el('small',row.lat.toFixed(4)+', '+row.lon.toFixed(4)));
+    const review=el('td');
+    review.append(el('small',row.warnings.length?row.warnings.join(' · '):mapped?row.source:'Location not resolved'));
+    const actions=el('td');
+    if (mapped) {
+      const show=el('button','Show on map','quiet smallbtn');
+      show.onclick=()=>focusSupplier(row);
+      actions.append(show);
+    }
+    const editLocation=el('button','Review','quiet');
+    editLocation.setAttribute('data-edit','');
+    editLocation.disabled=!canEdit()||saving||loading||busy||!loaded;
+    editLocation.onclick=()=>edit(row.id);
+    actions.append(editLocation);
+    tr.append(supplier,location,precision,review,actions);
+    body.append(tr);
+  }
+  $('rowCount').textContent=list.length.toLocaleString()+' of '+rows.length.toLocaleString()+' suppliers'+
+    (pageCount>1?' · '+(start+1).toLocaleString()+'–'+(start+page.length).toLocaleString()+' shown':'');
+  $('registerPages').hidden=pageCount<2;
+  $('previousRows').disabled=registerPage===0;
+  $('nextRows').disabled=registerPage+1>=pageCount;
+}
 function svg(tag,attrs){const e=document.createElementNS(NS,tag);for(const [k,v]of Object.entries(attrs))e.setAttribute(k,v);return e;}
-function updateSignals(groups) {
-  if (groups.length === signalsById.size &&
-      groups.every(group => signalsById.get(group.supplier.id) === group.level)) return;
-  signalsById = new Map(groups.map(group => [group.supplier.id, group.level]));
-  $('mapPopup').hidden = true;
+function closeMapPopup() {
+  $('mapPopup').hidden=true;
+  $('mapPopup').replaceChildren();
+}
+function updateSignals(groups,{state}={state:'idle'}) {
+  const previousState=screeningState;
+  screeningState=state;
+  const changed=groups.length!==signalsById.size || groups.some(group=>signalsById.get(group.supplier.id)!==group.level);
+  if (!changed && state===previousState) return;
+  if (changed) {
+    signalsById=new Map(groups.filter(group=>group.level==='red'||group.level==='yellow').map(group=>[group.supplier.id,group.level]));
+    closeMapPopup();
+  }
+  renderTable();
   renderDots();
+  if (onlyFlagged.checked && signalsById.size && previousState==='scanning' && state!=='scanning') fit();
 }
 function mapDisplayRows() {
-  return rows.map(row => signalsById.has(row.id) ? {...row, screeningLevel:signalsById.get(row.id)} : row);
+  return displayRows().map(row => signalsById.has(row.id) ? {...row, screeningLevel:signalsById.get(row.id)} : row);
 }
 if (typeof ResizeObserver === 'function') {
   new ResizeObserver(() => { if (!detailReady && identity && rows.length) renderDots(); }).observe($('mapwrap'));
 }
 function renderDots() {
   const displayRows = mapDisplayRows();
+  const mapped=displayRows.filter(hasPoint);
+  $('mapVisibleCount').textContent=mapped.length.toLocaleString()+' of '+rows.length.toLocaleString()+' suppliers on map';
+  $('neutralLegend').hidden=onlyFlagged.checked;
+  $('emptyMap').hidden=!!mapped.length;
+  if (!mapped.length) {
+    const noSignals=rows.length && onlyFlagged.checked && !displayRows.length;
+    $('emptyMapTitle').textContent=noSignals?signalEmptyMessage():'No mapped suppliers';
+    $('emptyMapHint').textContent=!rows.length?'Import a list to place your suppliers on the map.':
+      noSignals?'Clear “Yellow or red only” to show all suppliers.':'Review the locations in the supplier register.';
+  }
   detailMap?.update(displayRows);
   const dots = $('dots');
   dots.replaceChildren();
@@ -93,7 +174,7 @@ function renderDots() {
   const groups = new Map();
   const rect = $('map').getBoundingClientRect();
   const scale = rect.width && rect.height ? Math.max(view[2]/rect.width, view[3]/rect.height) : view[2]/1000;
-  for (const row of displayRows.filter(hasPoint)) {
+  for (const row of mapped) {
     const p = point(row.lat,row.lon);
     const key = Math.round(p.x / (18 * scale)) + ',' + Math.round(p.y / (18 * scale));
     if (!groups.has(key)) groups.set(key, {members:[], x:0, y:0, level:'neutral'});
@@ -123,7 +204,7 @@ function renderDots() {
     dots.append(pin);
   }
 }
-function focusSupplier(row){if(detailReady&&detailMap)detailMap.focus(row);else{const p=point(row.lat,row.lon);setView([p.x-22.5,p.y-11.25,45,22.5]);}popup([row]);$('mapwrap').scrollIntoView?.({behavior:'smooth',block:'center'});}
+function focusSupplier(row){if(!hasPoint(row)||(onlyFlagged.checked&&!signalsById.has(row.id)))return;if(detailReady&&detailMap)detailMap.focus(row);else{const p=point(row.lat,row.lon);setView([p.x-22.5,p.y-11.25,45,22.5]);}popup([row]);$('mapwrap').scrollIntoView?.({behavior:'smooth',block:'center'});}
 function popup(members) {
   const box = $('mapPopup');
   box.replaceChildren();
@@ -162,7 +243,7 @@ function popup(members) {
 }
 function setView(v){view=v;$('map').setAttribute('viewBox',v.join(' '));renderDots();}
 function zoom(f){if(detailReady&&detailMap)return detailMap.zoom(f);const w=Math.min(1500,Math.max(10,view[2]*f)),h=w/2;setView([view[0]+(view[2]-w)/2,view[1]+(view[3]-h)/2,w,h]);}
-function fit(){if(detailReady&&detailMap)return detailMap.fit(rows);const pts=filtered().filter(hasPoint).map(r=>point(r.lat,r.lon));if(!pts.length)return setView([0,0,1000,500]);const xs=pts.map(p=>p.x),ys=pts.map(p=>p.y),xmin=Math.min(...xs),xmax=Math.max(...xs),ymin=Math.min(...ys),ymax=Math.max(...ys),w=Math.min(1100,Math.max(45,(xmax-xmin)*1.35,(ymax-ymin)*2.7));setView([(xmin+xmax-w)/2,(ymin+ymax-w/2)/2,w,w/2]);}
+function fit(){if(detailReady&&detailMap)return detailMap.fit(mapDisplayRows());const pts=displayRows().filter(hasPoint).map(r=>point(r.lat,r.lon));if(!pts.length)return setView([0,0,1000,500]);const xs=pts.map(p=>p.x),ys=pts.map(p=>p.y),xmin=Math.min(...xs),xmax=Math.max(...xs),ymin=Math.min(...ys),ymax=Math.max(...ys),w=Math.min(1100,Math.max(45,(xmax-xmin)*1.35,(ymax-ymin)*2.7));setView([(xmin+xmax-w)/2,(ymin+ymax-w/2)/2,w,w/2]);}
 function edit(id){if(!editable())return;selected=rows.find(r=>r.id===id);if(!selected)return;$('editName').textContent=selected.name;$('editLocation').textContent=`${selected.city}, ${selected.country} · DUNS ${selected.duns}`;$('editLat').value=selected.lat??'';$('editLon').value=selected.lon??'';const list=$('candidateList');list.replaceChildren();if(selected.candidates?.length){list.append(el('p','Review the location candidates and select the correct city:'));for(const candidate of selected.candidates){const b=el('button',candidate.label,'quiet');b.type='button';b.onclick=()=>{if(!editable()||!selected)return;chooseCandidate(selected,candidate);changed();$('editDialog').close();render();notice('City selected. This dot is approximate.');};list.append(b);}}$('editDialog').showModal();}
 function importText(text){if(!editable())return;try{const imported=parseSuppliers(text);if(rows.length&&!confirm('Replace the working list with this import? The shared list changes only when you save.'))return;for(const r of imported)offlineMatch(r);rows=imported;$('search').value='';$('statusFilter').value='';$('countryFilter').value='';$('mapPopup').hidden=true;changed();render();fit();notice('Imported '+rows.length+' suppliers. '+rows.filter(hasPoint).length+' mapped; '+rows.filter(r=>!hasPoint(r)).length+' need review. Save shared list to keep these changes.');}catch(e){notice(e.message,true);}}
 async function locate(){if(!editable())return;const requestEpoch=epoch;if(!$('lookupConsent').checked){notice('Select the city + country lookup checkbox first.',true);return;}const candidates=rows.filter(r=>!hasPoint(r)&&r.city&&r.country&&!r.candidates?.length);const keys=[...new Set(candidates.map(r=>norm(r.country)+'|'+norm(r.city)))].slice(0,20);if(!keys.length){notice('No unresolved city names to look up. Review ambiguous matches in the register.');return;}busy=true;cancel=false;controls();$('cancelButton').hidden=false;$('locateButton').disabled=true;let count=0;try{for(const key of keys){if(cancel||requestEpoch!==epoch)break;const r=candidates.find(r=>norm(r.country)+'|'+norm(r.city)===key);let matches=cache.get(key);if(!matches){const pause=Math.max(0,1200-(Date.now()-lastLookupAt));if(pause)await new Promise(res=>setTimeout(res,pause));if(cancel||requestEpoch!==epoch)break;const url=new URL('https://nominatim.openstreetmap.org/search');url.searchParams.set('city',r.city);url.searchParams.set('country',r.country);url.searchParams.set('format','jsonv2');url.searchParams.set('addressdetails','1');url.searchParams.set('limit','5');const code=getCode(r.country);if(code)url.searchParams.set('countrycodes',code.toLowerCase());notice(`Looking up ${++count}/${keys.length}: ${r.city}, ${r.country}…`);lastLookupAt=Date.now();lookupAbort=new AbortController();const timer=setTimeout(()=>lookupAbort?.abort(),15000);let response;try{response=await fetch(url,{signal:lookupAbort.signal,credentials:'omit',referrerPolicy:'strict-origin-when-cross-origin'});}finally{clearTimeout(timer);}if(requestEpoch!==epoch||cancel)break;if(!response.ok)throw Error(`Lookup service returned ${response.status}. Existing locations are preserved; try later or enter coordinates.`);const results=await response.json();matches=results.filter(m=>String(m.lat??'').trim()!==''&&String(m.lon??'').trim()!==''&&Number.isFinite(Number(m.lat))&&Number.isFinite(Number(m.lon))&&Math.abs(Number(m.lat))<=90&&Math.abs(Number(m.lon))<=180&&(!code||m.address?.country_code?.toUpperCase()===code)).map(m=>({lat:Number(m.lat),lon:Number(m.lon),label:m.display_name,source:'OpenStreetMap Nominatim'}));matches=[...new Map(matches.map(m=>[m.lat+','+m.lon,m])).values()];if(requestEpoch!==epoch||cancel)break;cache.set(key,matches);}for(const match of candidates.filter(a=>norm(a.country)+'|'+norm(a.city)===key)){match.candidates=matches;match.precision=matches.length?'Review city match':'Unresolved';}changed();render();}if(requestEpoch!==epoch)return;notice(cancel?'Lookup stopped. Completed locations are preserved.':'Lookup complete. Review unmatched or ambiguous rows; save to keep your list.');}catch(e){if(requestEpoch!==epoch)return;notice(cancel?'Lookup stopped.':e.message==='Failed to fetch'?'City lookup is unavailable. Use offline matches or enter coordinates in Review.':e.message,true);}finally{if(requestEpoch===epoch){busy=false;lookupAbort=null;$('cancelButton').hidden=true;controls();}}}
@@ -173,7 +254,10 @@ $('exportButton').onclick=()=>{if(identity)download('supplier-locations.csv',csv
 $('locateButton').onclick=locate;$('cancelButton').onclick=()=>{cancel=true;lookupAbort?.abort();};
 $('saveButton').onclick=saveShared;$('reloadButton').onclick=loadShared;
 $('clearButton').onclick=()=>{if(!editable())return;if(rows.length&&!confirm('Clear the working list? Click Save shared list afterwards to remove it for everyone.'))return;rows=[];cache.clear();$('pasteInput').value='';$('mapPopup').hidden=true;changed();render();if(detailReady)detailMap.world();else setView([0,0,1000,500]);notice('Working list cleared. This is unsaved; reload to restore the shared list or save to clear it for everyone.');};
-for(const id of ['search','countryFilter','statusFilter'])$(id).addEventListener('input',renderTable);
+onlyFlagged.onchange=()=>{registerPage=0;closeMapPopup();renderTable();renderDots();fit();};
+for(const id of ['search','countryFilter','statusFilter'])$(id).addEventListener('input',()=>{registerPage=0;renderTable();});
+$('previousRows').onclick=()=>{if(registerPage>0){registerPage--;renderTable();}};
+$('nextRows').onclick=()=>{if(!$('nextRows').disabled){registerPage++;renderTable();}};
 $('worldButton').onclick=()=>detailReady?detailMap.world():setView([0,0,1000,500]);$('europeButton').onclick=()=>detailReady?detailMap.europe():setView([440,60,220,110]);$('fitButton').onclick=fit;$('zoomIn').onclick=()=>zoom(.7);$('zoomOut').onclick=()=>zoom(1.4);
 $('closeEdit').onclick=()=>$('editDialog').close();
 $('removeLocation').onclick=()=>{if(!editable()||!selected)return;selected.lat=null;selected.lon=null;selected.precision='Unresolved';selected.source='';selected.candidates=[];$('editDialog').close();changed();render();};
@@ -213,14 +297,14 @@ async function startDetailedMap(requestEpoch){
  try{
   const controller=await createSupplierMap({
    container:$('detailMap'),signal:abort.signal,
-   onSelect:ids=>{if(current()){const selectedIds=new Set(ids);const selected=rows.filter(r=>selectedIds.has(r.id));if(selected.length)popup(selected);}},
+   onSelect:ids=>{if(current()){const selectedIds=new Set(ids);const selected=displayRows().filter(r=>selectedIds.has(r.id));if(selected.length)popup(selected);}},
    onStatus:(message,error=false)=>{if(current()){$('mapStatus').textContent=message;$('mapStatus').classList.toggle('map-error',error);}},
-   onReady:()=>{ready=true;if(current()&&detailMap){showDetailedMap(true);detailMap.update(mapDisplayRows());detailMap.fit(rows);}}
+   onReady:()=>{ready=true;if(current()&&detailMap){showDetailedMap(true);detailMap.update(mapDisplayRows());detailMap.fit(mapDisplayRows());}}
   });
   if(!current()){controller.destroy();return;}
   detailMap=controller;
   detailMap.update(mapDisplayRows());
-  if(ready){showDetailedMap(true);detailMap.resize();detailMap.fit(rows);}
+  if(ready){showDetailedMap(true);detailMap.resize();detailMap.fit(mapDisplayRows());}
  }catch(error){
   if(!current())return;
   detailMap?.destroy();detailMap=null;showDetailedMap(false);

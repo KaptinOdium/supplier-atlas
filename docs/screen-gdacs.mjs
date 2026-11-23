@@ -110,7 +110,7 @@ export function matchGdacs(suppliers, data, {now = Date.now(), checkedAt = new D
       matches.push({supplier, kind: 'locality', decision: 'unreviewed', basis,
         reason: level + ' GDACS alert updated ' + date + '. ' + hazardEvidence +
           ' Verify local operational effects and current purchasing exposure.',
-        event: {id: 'gdacs-' + p.eventtype + '-' + p.eventid, country: supplier.country, site, date,
+        event: {id: 'gdacs-' + p.eventtype + '-' + p.eventid, country: supplier.country, site, date, category: hazards[p.eventtype].toLowerCase(),
           title: hazards[p.eventtype] + ' · ' + site, lastChecked: checkedAt.slice(0, 10),
           sources: [{name: 'GDACS · ' + level + ' alert', url: origin + '/report.aspx?' + episodeParams(p)}]}});
     }

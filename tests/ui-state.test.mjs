@@ -23,8 +23,9 @@ class Element {
   showModal(){this.open=true;}
   close(){this.open=false;}
 }
-async function fixture({configuredService=true,role='owner',loadFailure=false,cityPartCount=1,failedCityPart=null,detailedMap=false,deferMap=false,teardownFailure=false,assess=()=>"",hazardLoad=async()=>{throw Error("Unavailable");},gdacsLoad=async()=>{throw Error("Unavailable");},sharedRows=[],projectLoad=async()=>null}={}){
+async function fixture({configuredService=true,role='owner',loadFailure=false,cityPartCount=1,failedCityPart=null,detailedMap=false,deferMap=false,teardownFailure=false,assess=()=>"",hazardLoad=async()=>{throw Error("Unavailable");},gdacsLoad=async()=>{throw Error("Unavailable");},opsLoad=async()=>{throw Error("Unavailable");},sharedRows=[],projectLoad=async()=>null}={}){
   const nodes=new Map([...html.matchAll(/id="([^"]+)"/g)].map(m=>[m[1],new Element(m[1])]));
+  nodes.get('onlyFlagged').checked=/<input id="onlyFlagged"[^>]*\bchecked\b/.test(html);
   nodes.get('workspaceMain').hidden=true;nodes.get('loginForm').hidden=true;
   const editable=new Set([...html.matchAll(/<[^>]+\bid="([^"]+)"[^>]*data-edit[^>]*>/g)].map(m=>nodes.get(m[1])));
   let saves=0,identity=null;
@@ -62,7 +63,7 @@ async function fixture({configuredService=true,role='owner',loadFailure=false,ci
     if(path==='./world-map.json')return {ok:true,json:async()=>[]};
     throw Error('Unexpected fetch '+path);
   };
-  const context=vm.createContext({createScreeningPanel,projectAssessment:assess,loadHazardLeads:hazardLoad,loadGdacs:gdacsLoad,matchSuppliers,readPrivateRegister:JSON.parse,console,Map,Set,Intl,Number,String,Object,Array,Math,Date,URL,Blob,AbortController,AbortSignal,Promise,Error,Option:class extends Element{constructor(text,value){super();this.textContent=text;this.value=value;}},norm,parseSuppliers,csvExport,point,AccessError,ConflictError,configured,AuthClient:Auth,createSupplierMap,setIdentity:v=>identity=v,confirm:()=>true,setInterval:()=>0,setTimeout,clearTimeout,sessionStorage:{getItem:()=>null,setItem(){},removeItem(){}},window:{addEventListener(){}},document:{visibilityState:'visible',getElementById:id=>{if(!nodes.has(id))throw Error('Missing DOM id '+id);return nodes.get(id);},querySelectorAll:()=>[...editable,...[...nodes.values()].flatMap(n=>n.children).filter(n=>n?.attrs?.['data-edit']!==undefined)],createElement:()=>new Element(),createElementNS:()=>new Element(),addEventListener(){}},fetch:fetcher});
+  const context=vm.createContext({createScreeningPanel,projectAssessment:assess,loadHazardLeads:hazardLoad,loadGdacs:gdacsLoad,loadOperationalLeads:opsLoad,matchSuppliers,readPrivateRegister:JSON.parse,console,Map,Set,Intl,Number,String,Object,Array,Math,Date,URL,Blob,AbortController,AbortSignal,Promise,Error,Option:class extends Element{constructor(text,value){super();this.textContent=text;this.value=value;}},norm,parseSuppliers,csvExport,point,AccessError,ConflictError,configured,AuthClient:Auth,createSupplierMap,setIdentity:v=>identity=v,confirm:()=>true,setInterval:()=>0,setTimeout,clearTimeout,sessionStorage:{getItem:()=>null,setItem(){},removeItem(){}},window:{addEventListener(){}},document:{visibilityState:'visible',getElementById:id=>{if(!nodes.has(id))throw Error('Missing DOM id '+id);return nodes.get(id);},querySelectorAll:()=>[...editable,...[...nodes.values()].flatMap(n=>n.children).filter(n=>n?.attrs?.['data-edit']!==undefined)],createElement:()=>new Element(),createElementNS:()=>new Element(),addEventListener(){}},fetch:fetcher});
   vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace(/start\(\);\s*$/,'globalThis.ready=start();')+'\nglobalThis.state=()=>({rows,dirty,identity,loaded,view,detailReady});',context);
   await context.ready;
   const login=async password=>{nodes.get('loginEmail').value='member@example.com';nodes.get('loginPassword').value=password;await nodes.get('loginForm').onsubmit({preventDefault(){}});};
@@ -86,6 +87,9 @@ test('detailed maps initialize only after successful login and keep all sites wh
  await f.login('wrong');assert.equal(f.mapCalls.created,0);
  await f.login('valid-password');assert.equal(f.mapCalls.created,1);assert.equal(f.context.state().detailReady,true);
  f.nodes.get('pasteInput').value='Name,DUNS,Country,City,Latitude,Longitude\nSupplier A,001234567,Czechia,Prague,50,14\nSupplier B,001234568,Germany,Berlin,52,13';f.nodes.get('importButton').onclick();
+ assert.equal(f.nodes.get('onlyFlagged').checked,true);
+ assert.equal(f.mapCalls.updates.at(-1).length,0);
+ const toggle=f.nodes.get('onlyFlagged');toggle.checked=false;toggle.onchange();
  assert.equal(f.mapCalls.updates.at(-1).length,2);
  f.nodes.get('search').value='Supplier B';f.nodes.get('search').listeners.input();
  assert.deepEqual(f.mapCalls.updates.at(-1).map(row=>row.name),['Supplier A','Supplier B']);assert.equal(f.nodes.get('tableBody').children.length,1);
@@ -180,16 +184,17 @@ test('Atlas loads its own screening code and requests public incident feeds with
   }
 });
 
-test('one action scans the entire list, groups overlapping source evidence and updates the unfiltered map',async()=>{
+test('the full-list scan updates yellow and red suppliers regardless of the register search',async()=>{
   let projectRequests=0;
   const hazardRequests=[],gdacsRequests=[];
-  const rows=[supplierRow('s1','Example Automotive GmbH'),supplierRow('s2','Elsewhere AG')];
+  const rows=[supplierRow('s1','Example Automotive GmbH'),supplierRow('s2','Elsewhere AG'),supplierRow('s3','Unflagged supplier')];
   const project=registerFor('Example Automotive','Plant fire stops production',true);
   project.watchlist.push({...registerFor('Elsewhere','Project flood watch').events[0],id:'flood'});
   const f=await fixture({sharedRows:rows,detailedMap:true,
     projectLoad:async()=>{projectRequests++;return project;},
     hazardLoad:async(list,options)=>{hazardRequests.push([list.length,options.force]);return {
       coverage:'Live sample',checkedAt:today,matches:[{supplier:list[0],event:project.events[0],decision:'unreviewed',kind:'locality',basis:'City only',reason:'Local hazard lead.'}]};},
+    opsLoad:async()=>({matches:[],items:[],coverage:'Industry reports',checkedAt:today}),
     gdacsLoad:async(list,options)=>{gdacsRequests.push([list.length,options.force]);return {
       coverage:'Public disaster feed',checkedAt:today,matches:[{supplier:list[1],event:{...project.watchlist[0],title:'Cyclone report'},decision:'unreviewed',kind:'locality',basis:'Area warning',reason:'Verify access.'}]};}
   });
@@ -199,20 +204,90 @@ test('one action scans the entire list, groups overlapping source evidence and u
   await f.login('valid-password');await settled();
   f.nodes.get('search').value='Elsewhere';f.nodes.get('search').listeners.input();
   await f.nodes.get('refreshScreening').onclick();
-  assert.deepEqual(hazardRequests,[[2,false],[2,true]]);
-  assert.deepEqual(gdacsRequests,[[2,false],[2,true]]);
+  assert.deepEqual(hazardRequests,[[3,false],[3,true]]);
+  assert.deepEqual(gdacsRequests,[[3,false],[3,true]]);
   assert.equal(projectRequests,2);
-  assert.match(f.nodes.get('scanStatus').textContent,/2 suppliers scanned.*1 red.*1 yellow/);
+  assert.match(f.nodes.get('scanStatus').textContent,/3 suppliers scanned.*1 red.*1 yellow/);
   assert.deepEqual(descendants(findings(f)).filter(n=>n.className==='scan-dot').map(n=>n.attrs['data-level']),['red','yellow']);
   const details=openEvidence(f);
   for(const expected of ['Example Automotive GmbH','Elsewhere AG','Active site incident','Needs review','Plant fire stops production','Project flood watch','Employer statement','Global Incident Tracker','Local hazard lead.','GDACS','Cyclone report']) assert.ok(details.includes(expected),expected);
   assert.match(f.nodes.get('scanCoverage').textContent,/partial.*private sources use saved reviews/i);
   assert.deepEqual(f.mapCalls.updates.at(-1).map(r=>r.screeningLevel),['red','yellow']);
+  assert.match(f.nodes.get('mapVisibleCount').textContent,/2 of 3/);
+  assert.equal(f.nodes.get('tableBody').children.length,1);
+  const toggle=f.nodes.get('onlyFlagged');
+  const downloads=[];
+  f.context.download=(name,csv)=>downloads.push(csv);
+  f.nodes.get('exportButton').onclick();
+  assert.match(downloads[0],/Elsewhere/);
+  assert.doesNotMatch(downloads[0],/Example Automotive|Unflagged/);
+  f.nodes.get('fitButton').onclick();
+  assert.deepEqual(f.mapCalls.fits.at(-1).map(r=>r.id),['s1','s2']);
+  f.mapCalls.options.onSelect(['s2','s3']);
+  assert.match(nodeText(f.nodes.get('mapPopup')),/Elsewhere/);
+  assert.doesNotMatch(nodeText(f.nodes.get('mapPopup')),/Unflagged/);
+  toggle.checked=false;toggle.onchange();
+  assert.equal(f.nodes.get('mapPopup').hidden,true);
+  assert.deepEqual(f.mapCalls.fits.at(-1).map(r=>r.id),['s1','s2','s3']);
+  assert.equal(f.nodes.get('tableBody').children.length,1);
+  assert.equal(hazardRequests.length,2);
   assert.ok(!f.context.state().rows.some(r=>Object.hasOwn(r,'screeningLevel')),'scan indicators are transient');
   assert.doesNotMatch(html,/id="checkTracker"/);
   f.nodes.get('pasteInput').value='Name,DUNS,Country,City\nNew Supplier,001234567,Czechia,Brno';
   f.nodes.get('importButton').onclick();await settled();
   assert.doesNotMatch(nodeText(findings(f)),/Example Automotive|Elsewhere/);
+});
+
+test('the fallback map and register distinguish a pending scan, partial coverage and unmapped matches',async()=>{
+  let report;
+  const rows=[supplierRow('s1','Neutral site'),{...supplierRow('s2','Yellow site'),lat:null,lon:null}];
+  const f=await fixture({sharedRows:rows,projectLoad:()=>new Promise(resolve=>{report=resolve;})});
+  await f.login('valid-password');
+  assert.match(f.nodes.get('emptyMapTitle').textContent,/Scanning/);
+  assert.match(f.nodes.get('emptyTable').textContent,/Scanning/);
+  assert.equal(f.nodes.get('dots').children.length,0);
+  report(registerFor('Unrelated supplier'));await settled();
+  assert.match(f.nodes.get('emptyMapTitle').textContent,/No yellow or red.*partial/);
+  assert.equal(f.nodes.get('neutralLegend').hidden,true);
+  const file={name:'risk.json',size:1024,text:async()=>JSON.stringify(registerFor('Yellow site'))};
+  await f.nodes.get('privateRegister').onchange({target:{files:[file]}});
+  assert.match(nodeText(f.nodes.get('tableBody')),/Yellow site.*Needs review/);
+  assert.doesNotMatch(nodeText(f.nodes.get('tableBody')),/Neutral/);
+  assert.equal(f.nodes.get('emptyMap').hidden,false);
+  assert.match(f.nodes.get('emptyMapHint').textContent,/Review the locations/);
+  const toggle=f.nodes.get('onlyFlagged');toggle.checked=false;toggle.onchange();
+  assert.equal(f.nodes.get('neutralLegend').hidden,false);
+  assert.equal(f.nodes.get('dots').children.length,1);
+  assert.match(f.nodes.get('mapVisibleCount').textContent,/1 of 2/);
+  f.nodes.get('dots').children[0].onclick({stopPropagation(){}});
+  assert.match(nodeText(f.nodes.get('mapPopup')),/Neutral site/);
+  toggle.checked=true;toggle.onchange();
+  assert.equal(f.nodes.get('mapPopup').hidden,true);
+  assert.equal(f.nodes.get('dots').children.length,0);
+  assert.equal(f.nodes.get('tableBody').children.length,1);
+});
+
+test('register pagination and export follow the displayed suppliers without truncating the file',async()=>{
+  const rows=Array.from({length:1001},(_,i)=>supplierRow('s'+(i+1),'Site '+String(i+1).padStart(4,'0')));
+  const f=await fixture({sharedRows:rows,detailedMap:true});
+  await f.login('valid-password');await settled();
+  assert.match(f.nodes.get('emptyMapTitle').textContent,/sources are unavailable/);
+  const toggle=f.nodes.get('onlyFlagged');toggle.checked=false;toggle.onchange();
+  assert.equal(f.nodes.get('tableBody').children.length,1000);
+  assert.equal(f.nodes.get('registerPages').hidden,false);
+  f.nodes.get('nextRows').onclick();
+  assert.equal(f.nodes.get('tableBody').children.length,1);
+  assert.match(nodeText(f.nodes.get('tableBody')),/Site 1001/);
+  const downloads=[];f.context.download=(name,csv)=>downloads.push(csv);
+  f.nodes.get('exportButton').onclick();
+  assert.match(downloads[0],/Site 0001/);assert.match(downloads[0],/Site 1001/);
+  toggle.checked=true;toggle.onchange();
+  assert.equal(f.nodes.get('registerPages').hidden,true);
+  assert.equal(f.nodes.get('tableBody').children.length,0);
+  f.nodes.get('exportButton').onclick();
+  assert.doesNotMatch(downloads[1],/Site /);
+  toggle.checked=false;toggle.onchange();
+  assert.match(nodeText(f.nodes.get('tableBody').children[0]),/Site 0001/);
 });
 
 test('partial or unavailable sources remain explicit and a local file can supply independent evidence',async()=>{
@@ -293,4 +368,35 @@ test('owner policy, source provenance, and individual provider decisions remain 
   for(const expected of ['Public finding','Private finding',decisionNames.watch,'rules v2 / watch','rules v2 / unreviewed',decisionNames.unreviewed])assert.ok(evidence.includes(expected),expected);
   const coverage=nodeText(f.nodes.get('screeningSources'));
   for(const expected of ['Verify roads and power.','Private alerting system','Discovery','Manual review only'])assert.ok(coverage.includes(expected),expected);
+});
+
+test('one scan displays industry coverage without requiring a supplier match and filters findings without rescanning',async()=>{
+  const rows=[supplierRow('a','Example Manufacturing'),supplierRow('b','Elsewhere')];
+  const now=new Date().toISOString();
+  const reports=['production','labor','logistics','cyber','quality','financial'].map((category,i)=>({
+    id:'news-'+i,title:'Published '+category+' incident',category,publishedAt:now,publisher:'Example publisher',url:'https://example.org/'+i
+  }));
+  let calls=0;
+  const f=await fixture({role:'viewer',sharedRows:rows,
+    opsLoad:async list=>{calls++;return {checkedAt:now,items:reports,coverage:'6 reports',
+      matches:[{supplier:list[0],event:{...reports[1],date:today,sources:[]},decision:'watch',kind:'company-only',reason:'Confirm the site.'}]};},
+    hazardLoad:async list=>({checkedAt:now,matches:[{supplier:list[1],event:{id:'wx',title:'Storm warning',category:'storm',sources:[]},decision:'unreviewed',kind:'locality'}]})
+  });
+  assert.equal(calls,0);
+  await f.login('valid-password');await settled();
+  assert.equal(calls,1);
+  assert.match(f.nodes.get('scanStatus').textContent,/2 suppliers scanned.*2 yellow/);
+  const feed=f.nodes.get('industryList');
+  for(const item of reports)assert.ok(nodeText(feed).includes(item.title));
+  const industryFilter=f.nodes.get('industryFilter');
+  industryFilter.value='cyber';industryFilter.onchange();
+  assert.match(nodeText(feed),/Published cyber incident/);
+  assert.doesNotMatch(nodeText(feed),/Published labor/);
+  const findingFilter=f.nodes.get('findingsFilter');
+  findingFilter.value='labor';findingFilter.onchange();
+  assert.match(nodeText(findings(f)),/Example Manufacturing/);
+  assert.doesNotMatch(nodeText(findings(f)),/Elsewhere/);
+  assert.equal(calls,1);
+  await f.nodes.get('logoutButton').onclick();
+  assert.equal(nodeText(feed),'');assert.equal(f.nodes.get('industryStatus').textContent,'');
 });

@@ -104,18 +104,19 @@ export async function createSupplierMap({ container, onSelect = () => {}, onStat
     map.setFilter(SELECTED, ['==', ['get', 'supplierId'], selectedId]);
   }
   async function selectCluster(feature) {
-    const source = map.getSource(SOURCE), generation = styleGeneration;
+    const source = map.getSource(SOURCE), generation = styleGeneration, rows = currentRows;
+    const current = () => live() && generation === styleGeneration && rows === currentRows;
     if (!source) return;
     try {
       const clusterId = Number(feature.properties.cluster_id);
       const zoom = await source.getClusterExpansionZoom(clusterId);
-      if (!live() || generation !== styleGeneration) return;
+      if (!current()) return;
       const coordinates = feature.geometry.coordinates;
       if (map.getZoom() >= 14.5) {
         const leaves = await source.getClusterLeaves(clusterId, Math.min(currentRows.length, 10000), 0);
-        if (live() && generation === styleGeneration) onSelect(leaves.map(item => item.properties.supplierId));
+        if (current()) onSelect(leaves.map(item => item.properties.supplierId));
       } else map.easeTo({ center: coordinates, zoom: Math.min(zoom, 16), duration: motion });
-    } catch { report('The supplier group changed. Select it again.', false); }
+    } catch { if (current()) report('The supplier group changed. Select it again.', false); }
   }
   function changeTheme(event) {
     const next = event.detail?.theme === 'dark' ? 'dark' : 'light';

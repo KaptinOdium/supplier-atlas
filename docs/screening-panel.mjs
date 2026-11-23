@@ -1,14 +1,16 @@
 import {summarizeSignals} from './screen-signals.mjs';
 import {decisionNames} from './screen-policy.mjs';
+import {createReportView, riskNames, riskType, setRiskOptions} from './risk-view.mjs';
 
 const signalLabels = { red: 'Active site incident', yellow: 'Needs review' };
 const projectSource = 'Project register';
+const operationsSource = 'Industry reports';
 const dayFormat = new Intl.DateTimeFormat('en-CA', {timeZone:'Europe/Prague', year:'numeric', month:'2-digit', day:'2-digit'});
 const timeFormat = new Intl.DateTimeFormat('en-GB', {timeZone:'Europe/Prague', dateStyle:'medium', timeStyle:'short'});
 const number = value => value.toLocaleString('en-US');
 
 export function createScreeningPanel({document, loadProject, readPrivateRegister, matchSuppliers,
-  countryCode, loadHazardLeads, loadGdacs, canReadProject, projectAssessment, onSignals = () => {}, onShowMap}) {
+  countryCode, loadHazardLeads, loadGdacs, loadOperationalLeads, canReadProject, projectAssessment, onSignals = () => {}, onShowMap}) {
   const get = id => document.getElementById(id);
   const node = (tag, text, cls) => {
     const item = document.createElement(tag);
@@ -18,10 +20,12 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
   };
   const button = get('refreshScreening'), fileInput = get('privateRegister'), removeFile = get('removeRegister');
   const status = get('scanStatus'), coverage = get('scanCoverage'), sources = get('screeningSources'), results = get('screeningResults');
+  const findingsFilter = get('findingsFilter'), renderReports = createReportView(document);
   let rows = null, sourceRuns = [], localRegister = null, localName = '', localResult = null, groups = [], completed = null;
   let generation = 0, fileGeneration = 0, busy = false, activePolicy = null;
   let visibleLimit = 40;
   const disclosures = new Map();
+  let displayed = [];
 
   function controls() {
     button.disabled = !rows?.length || busy;
@@ -66,6 +70,14 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
     const phase = run.state === 'ready' ? run.date || 'Checked' : run.state === 'loading' ? 'Checking…' : 'Unavailable';
     section.append(node('summary',run.name + ' · ' + phase));
     if (run.note) section.append(node('p',run.note));
+    if (run.sources?.length) {
+      const list = node('ul');
+      for (const source of run.sources) safeLink(list,{
+        name:source.name,url:source.url,checkStatus:source.status === 'ok' ? 'Checked · ' + source.retained + ' reports' : 'Unavailable',
+        published:source.checkedAt
+      });
+      section.append(list);
+    }
     if (run.register) {
       if (run.register.coverageNote) section.append(node('p',run.register.coverageNote));
       if (run.register.screeningRules) {
@@ -86,7 +98,7 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
     const {match,source} = groupItem, {event,reason,basis,decision} = match;
     const item = node('article',undefined,'scan-incident');
     item.append(node('b',event.title || event.company || 'Screened event'));
-    item.append(node('small',[source,event.date,event.site || event.country].filter(Boolean).join(' · ')));
+    item.append(node('small',[riskNames[riskType(event)],source,event.date,event.site || event.country].filter(Boolean).join(' · ')));
     const label = decisionNames[decision] || decision;
     item.append(node('p',[label,reason].filter(Boolean).join(' — ')),node('p',basis));
     const assessment = activePolicy && projectAssessment?.(match,activePolicy,today);
@@ -101,7 +113,12 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
 
   function renderResults(today) {
     results.replaceChildren(); disclosures.clear();
-    if (!groups.length) return;
+    const filter = findingsFilter.value;
+    displayed = filter ? groups.map(group => {
+      const items = group.items.filter(item=>riskType(item.match.event)===filter);
+      return {...group,items,level:items.some(item=>item.level==='red')?'red':'yellow'};
+    }).filter(group=>group.items.length).sort((a,b)=>Number(b.level==='red')-Number(a.level==='red')) : groups;
+    if (!displayed.length) return;
     const wrap=node('div',undefined,'tablewrap'), table=node('table',undefined,'scan-table');
     table.setAttribute('aria-label','Supplier findings');
     const head=node('thead'), tr=node('tr'), body=node('tbody');
@@ -110,11 +127,11 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
     const more=node('button','Show more suppliers','quiet');more.type='button';
     let shown=0;
     function appendThrough(limit) {
-      const last=Math.min(limit,groups.length);
+      const last=Math.min(limit,displayed.length);
       while(shown<last) {
-        const {supplier,level,items}=groups[shown++], row=node('tr'), indicator=node('td');
+        const {supplier,level,items}=displayed[shown++], row=node('tr'), indicator=node('td');
         const marker=node('i',undefined,'scan-dot');marker.setAttribute('aria-hidden','true');marker.setAttribute('data-level',level);
-        indicator.append(marker,node('span',signalLabels[level]));
+        indicator.append(marker,node('span',signalLabels[level]),node('small',[...new Set(items.map(item=>riskNames[riskType(item.match.event)]))].join(' · ')));
         const who=node('td');who.append(node('b',supplier.name || 'Unnamed supplier'),node('small','DUNS ' + (supplier.duns || 'unavailable')));
         const site=node('td',[supplier.city,supplier.country].filter(Boolean).join(', '));
         const cell=node('td'), detail=node('details',undefined,'scan-evidence');
@@ -136,14 +153,18 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
         disclosures.set(supplier.id || supplier.duns,{detail,heading,fill});
         cell.append(detail);row.append(indicator,who,site,cell);body.append(row);
       }
-      more.hidden=shown>=groups.length;
+      more.hidden=shown>=displayed.length;
     }
     more.onclick=()=>{visibleLimit+=40;appendThrough(visibleLimit);};
     appendThrough(visibleLimit);results.append(more);
   }
 
   function showSupplier(id) {
-    const index = groups.findIndex(group => (group.supplier.id || group.supplier.duns) === id);
+    const isSupplier = group => (group.supplier.id || group.supplier.duns) === id;
+    if (!displayed.some(isSupplier) && groups.some(isSupplier)) {
+      findingsFilter.value = ''; renderResults(dayFormat.format(new Date()));
+    }
+    const index = displayed.findIndex(isSupplier);
     if (index<0) return false;
     if (!disclosures.has(id)) {visibleLimit=Math.max(visibleLimit,index+1);renderResults(dayFormat.format(new Date()));}
     const {detail,heading,fill}=disclosures.get(id);
@@ -159,7 +180,8 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
     sources.replaceChildren();
     if (!rows?.length) {
       status.textContent = rows ? 'Import or load a supplier list to scan.' : '';
-      coverage.textContent='';results.replaceChildren();disclosures.clear();groups=[];onSignals(groups);return;
+      coverage.textContent='';results.replaceChildren();disclosures.clear();groups=[];displayed=[];
+      setRiskOptions(findingsFilter,new Map(),document);renderReports(null);onSignals(groups,{state:'idle'});return;
     }
     const runs=[...sourceRuns];
     if(localRegister) {
@@ -167,6 +189,7 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
       runs.push(localResult);
     }
     for(const run of runs)sources.append(sourceDetail(run));
+    renderReports(runs.find(run=>run.name===operationsSource));
     const owner=canReadProject();
     sources.append(node('p',owner
       ? 'Private and manually reviewed sources use saved evidence. Only the public feeds are refreshed during this scan.'
@@ -177,6 +200,12 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
     const today=dayFormat.format(new Date());
     const findings=ready.flatMap(run=>run.matches.map(match=>({source:run.name,match})));
     groups=summarizeSignals(findings,activePolicy,today);
+    const counts = new Map();
+    for (const group of groups) {
+      for (const category of new Set(group.items.map(item=>riskType(item.match.event))))
+        counts.set(category,(counts.get(category) || 0) + 1);
+    }
+    setRiskOptions(findingsFilter,counts,document);
     const red=groups.filter(group=>group.level==='red').length, yellow=groups.length-red;
     if(busy) {
       status.textContent='Checking '+number(rows.length)+' suppliers…';
@@ -189,7 +218,8 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
       owner ? 'Partial coverage · private sources use saved reviews' : limited.length ? 'Limited public feed coverage' : 'Public feed coverage';
     renderResults(today);
     if(!groups.length && !busy && ready.length)results.append(node('p','No supplier signals in the sources checked.','scan-empty'));
-    onSignals(groups);
+    const state = busy ? 'scanning' : !ready.length ? 'unavailable' : failure.length || limited.length ? 'partial' : 'complete';
+    onSignals(groups,{state});
   }
 
   async function scan(force=false) {
@@ -204,10 +234,11 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
         return registerResult(projectSource,register,supplierRows,'Saved project reviews. Open a source below for its latest documented check.');
       }]);
     }
-    for(const [name,load] of [['Global Incident Tracker',loadHazardLeads],['GDACS',loadGdacs]]) {
+    for(const [name,load] of [[operationsSource,loadOperationalLeads],['Global Incident Tracker',loadHazardLeads],['GDACS',loadGdacs]]) {
       work.push([name,async()=>{
         const payload=await load(supplierRows,{countryCode,force});
-        return {name,state:'ready',date:payload.checkedAt,note:payload.coverage,sourceURL:payload.sourceURL,matches:payload.matches};
+        return {name,state:'ready',date:payload.checkedAt,note:payload.coverage,sourceURL:payload.sourceURL,matches:payload.matches,
+          items:payload.items,sources:payload.sources};
       }]);
     }
     sourceRuns=work.map(([name])=>({name,state:'loading'}));controls();render();
@@ -256,6 +287,7 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
     }
   };
   button.onclick=()=>scan(true);
+  findingsFilter.onchange=()=>{visibleLimit=40;renderResults(dayFormat.format(new Date()));};
   removeFile.onclick=()=>{clearFile();controls();render();};
   controls();
   return {setRows, reset, showSupplier};

@@ -6,6 +6,10 @@ Global Incident Tracker supplies public incident reports for discovery. Atlas li
 
 The Global Disaster Alert and Coordination System (GDACS) supplies public disaster alerts and event footprints. Atlas links reported matches to the GDACS event and identifies the supplier location's precision in the basis for review. [GDACS](https://www.gdacs.org/)
 
+The scheduled industry feed uses the GDELT Global Knowledge Graph to find public news reports. Each report links to its publisher. The browser also checks the GDELT DOC index when the saved public feed is unavailable or stale. DOC results display the time GDELT first saw the article. [GDELT data](https://www.gdeltproject.org/data.html) · [GDELT DOC](https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/)
+
+The UK Office for Product Safety and Standards and Transport Canada publish safety and recall notices. The Gazette publishes UK company administration notices. Atlas links each notice to the issuing source. [UK product safety notices](https://www.gov.uk/product-safety-alerts-reports-recalls) · [UK Open Government Licence](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/) · [Transport Canada recall feeds](https://recalls-rappels.canada.ca/en/rss-feeds) · [The Gazette administration notices](https://www.thegazette.co.uk/all-notices/notice?noticetypes=2410) · [The Gazette data reuse](https://www.thegazette.co.uk/all-notices/content/134)
+
 Saved project and imported registers carry their own evidence references and documented review dates. Owners can inspect the project register's source list after signing in.
 
 ## Maps and locations
