@@ -2,7 +2,7 @@
 
 ## Screening
 
-Manual agent scans consult the public [AutoStrike calendar](https://kaptinodium.github.io/automobilewatch/latest-calendar.json) for dated labor actions and [Ransomware.live](https://www.ransomware.live/) for reported extortion claims. Each scan records which sources responded. A ransomware listing is a lead for checking a company’s statement and operating status.
+Manual agent scans consult the public [AutoStrike calendar](https://kaptinodium.github.io/automobilewatch/latest-calendar.json) for dated labor actions. [RansomLook](https://www.ransomlook.io/) and [RansomPosts](https://ransom.privtools.eu/), which republishes Ransomware.live observations, provide leads for checking a company's statement and operating status. The agent searches Bing News, Google News and GDELT for current reporting and follow-up evidence. Each run records which sources responded. Individual reports identify their publisher or the service providing the article link.
 
 Global Incident Tracker supplies public incident reports for discovery. Atlas links each displayed report to its incident page and includes the original publisher when available. Global Incident Tracker credits its data under CC BY 4.0. [Global Incident Tracker](https://globalincidenttracker.com/) · [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 

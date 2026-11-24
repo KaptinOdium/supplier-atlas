@@ -3,7 +3,8 @@ const endpoints = {
   strikes: 'https://kaptinodium.github.io/automobilewatch/latest-calendar.json',
   tracker: 'https://globalincidenttracker.com/api/incidents.php?format=list&days=1',
   gdacs: 'https://www.gdacs.org/gdacsapi/api/events/geteventlist/events4app',
-  cyber: 'https://api.ransomware.live/v2/recentvictims',
+  cyber: 'https://www.ransomlook.io/api/recent',
+  ransomPosts: 'https://ransom.privtools.eu/assets/recent.json',
   news: 'https://api.gdeltproject.org/api/v2/doc/doc',
 };
 const day = 86400000;
@@ -140,15 +141,24 @@ function gdacsReports(data: unknown, now: number) {
       id:'gdacs-'+type+'-'+p.eventid, country, hazardType:kind, severity:level, ...coords(point[1],point[0]), ...(type==='EQ'?{magnitude}:{})}];
   });
 }
-function cyberReports(data: unknown, now: number) {
-  return rows(data, 180).flatMap((r): Report[] => {
-    const name = str(r.victim || r.post_title,120), group = str(r.group || r.group_name,80);
-    const date = utc(r.discovered), sector = str(r.activity,100), link = publicURL(r.url);
-    if (!name || !group || !recent(date,now) || !industrial.test([sector,name,str(r.description)].join(' ')) ||
-        !/^https:\/\/(?:www\.)?ransomware\.live\/(?:id|victim)\//i.test(link)) return [];
-    const e = evidence('Ransomware.live',link,date,'first-seen')!;
-    return [{...report('ransomware-live',name+' named in '+group+' ransomware claim','cyber',e,
-      'Ransomware.live recorded an extortion claim'+(sector ? ' and lists the sector as '+sector : '')+'. The listing does not establish a breach or operational interruption.'),
+function xmlText(value: string) {
+  return value.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g,'$1').replace(/<[^>]*>/g,'').replace(/&(?:amp|lt|gt|quot|apos|#39|#x27|nbsp);/gi,
+    match=>({'&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&apos;':"'",'&#39;':"'",'&#x27;':"'",'&nbsp;':' '}[match.toLowerCase()] || ''));
+}
+function claimReports(data: unknown, now: number, mirror: boolean) {
+  const monitor = mirror ? 'RansomPosts (Ransomware.live data)' : 'RansomLook';
+  return rows(data, 350).flatMap((r): Report[] => {
+    const name = str(xmlText(str(r.post_title,1600)),120), group = str(xmlText(str(r.group_name,2000)),80);
+    const date = utc(r.discovered), sector = str(r.activity,100);
+    if (!name || !group || !recent(date,now) || !(industrial.test([sector,name,str(r.description)].join(' ')) ||
+        /\b(?:automobil|maschin|ingenieur|établissements industriels|industries|toyota|volkswagen|stellantis|bmw|renault|ford motor|hyundai|honda motor|nissan|daimler|mercedes.benz)\w*/i.test(name))) return [];
+    const groupPath = str(r.group_name,2000).match(/href=['"](\/group\/[a-z\d_-]+\/)['"]/i)?.[1];
+    const page = mirror ? 'https://ransom.privtools.eu'+(groupPath || '/') : 'https://www.ransomlook.io/recent?window=7';
+    // A text fragment identifies this listing on a public monitor's page shared by many claim records.
+    // Never use the feed's leak, claimed victim, screenshot or torrent URLs as evidence.
+    const e: Evidence = {name:monitor,url:page+'#:~:text='+encodeURIComponent(name),date,dateBasis:'first-seen'};
+    return [{...report(mirror ? 'ransomposts' : 'ransomlook',name+' named in '+group+' ransomware claim','cyber',e,
+      monitor+' lists an extortion claim'+(sector ? ' in the '+sector+' sector' : '')+'. The listing does not establish a breach or operational interruption.'),
       entities:[name], confirmation:'unverified claim', country:str(r.country)}];
   });
 }
@@ -163,7 +173,34 @@ function newsReports(data: unknown, now: number) {
 function newsURL(query: string) {
   return endpoints.news+'?'+new URLSearchParams({query,mode:'artlist',format:'json',timespan:'3d',maxrecords:'75',sort:'datedesc'});
 }
-async function readJSON(url: string, deadline: number, init: RequestInit = {}) {
+function rssURL(engine:'bing'|'google',query:string) {
+  if (engine==='google') return 'https://news.google.com/rss/search?'+new URLSearchParams({q:query+' when:3d',hl:'en-US',gl:'US',ceid:'US:en'});
+  return 'https://www.bing.com/news/search?'+new URLSearchParams({q:query,format:'rss',mkt:'en-us',sortby:'Date'});
+}
+function rssReports(data:unknown,now:number,engine:'bing'|'google') {
+  if (typeof data!=='string' || !/<rss[\s>]/i.test(data) || !/<channel[\s>]/i.test(data) || !/<\/rss>/i.test(data)) throw Error('Unexpected RSS format');
+  const tag=(item:string,name:string)=>xmlText(item.match(new RegExp('<'+name+'(?:\\s[^>]*)?>([\\s\\S]*?)<\\/'+name+'>','i'))?.[1] || '').trim();
+  const list:Report[]=[];
+  for (const match of data.matchAll(/<item(?:\s[^>]*)?>([\s\S]*?)<\/item>/gi)) {
+    const item=match[1], publisher=str(tag(item,'source') || tag(item,'News:Source'),140);
+    const rawTitle=str(tag(item,'title'));
+    const title=publisher && rawTitle.endsWith(' - '+publisher) ? rawTitle.slice(0,-publisher.length-3) : rawTitle;
+    const millis=Date.parse(tag(item,'pubDate'));
+    if (!Number.isFinite(millis)) continue;
+    const date=new Date(millis).toISOString(), category=classify(title);
+    let href=publicURL(tag(item,'link'));
+    if (!href || !category || !recent(date,now)) continue;
+    const indexed=new URL(href);
+    if (engine==='bing' && /(^|\.)bing\.com$/.test(indexed.hostname)) href=publicURL(indexed.searchParams.get('url')) || href;
+    const proxy=/(?:^|\.)(?:google|bing)\.com$/.test(new URL(href).hostname);
+    if (proxy && !publisher) continue;
+    const e=evidence(publisher || new URL(href).hostname,href,date,'published');
+    if (e) list.push(report(engine+'-news',title,category,e,'Published headline indexed by '+(engine==='bing'?'Bing News':'Google News')+'.'+(proxy?' The index provides the article link via its news service.':'')));
+    if (list.length>=70) break;
+  }
+  return list;
+}
+async function readBody(url: string, deadline: number, init: RequestInit = {}, textOnly = false) {
   // URL construction is internal. A redirect may not change the destination of any authorized request.
   const timeout = Math.min(deadline - Date.now(), 11000);
   if (timeout < 1) throw Error('Time budget exceeded');
@@ -180,7 +217,9 @@ async function readJSON(url: string, deadline: number, init: RequestInit = {}) {
       content += decoder.decode(value,{stream:true});
     }
   } finally { reader.releaseLock(); }
-  try { return JSON.parse(content+decoder.decode()) as unknown; } catch { throw Error('Invalid JSON feed'); }
+  content+=decoder.decode();
+  if (textOnly) return content;
+  try { return JSON.parse(content) as unknown; } catch { throw Error('Invalid JSON feed'); }
 }
 async function parallel<T,R>(items: T[], limit: number, fn: (v:T)=>Promise<R>) {
   const results = new Array<R>(items.length);
@@ -269,7 +308,7 @@ function planner(deadline: number) {
         const tool = 'prioritize_public_search';
         const parameters = {type:'object',additionalProperties:false,properties:{
           ranked:{type:'array',items:{type:'integer'}}, followUp:{type:'integer'}}, required:['ranked','followUp']};
-        const data = fields(await readJSON('https://api.openai.com/v1/chat/completions',deadline,{
+        const data = fields(await readBody('https://api.openai.com/v1/chat/completions',deadline,{
           method:'POST',headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},body:JSON.stringify({
             model:'gpt-4.1-mini',max_completion_tokens:200,temperature:0,tools:[{type:'function',function:{
               name:tool,description:'Rank the supplied option IDs and select one of their allowed follow-up searches.',strict:true,parameters}}],
@@ -304,20 +343,24 @@ function choicesFor(reports:Report[]):Choice[] {
   return reports.map(r=>({text:r.title+' '+(r.hazardType || '')+' '+r.summary.slice(0,350),query:queryFor(r)}));
 }
 type Source = [string,string,string,(data:unknown,now:number)=>Report[]];
+function rssSource(engine:'bing'|'google',query:string,follow=false): Source {
+  const label=engine==='bing'?'Bing News':'Google News';
+  return [engine+'-'+(follow?'followup':'news'),label+(follow?' event follow-up':' worldwide search'),rssURL(engine,query),
+    (body,now)=>rssReports(body,now,engine)];
+}
 export async function runResearch() {
   const start = Date.now(), deadline = start+65000, coverage: Coverage[] = [];
   const sources: Source[] = [
     ['autostrike','Daily AutoStrike',endpoints.strikes,strikeReports],
-    ['incident-tracker','Global Incident Tracker',endpoints.tracker,trackerReports],
     ['gdacs','GDACS',endpoints.gdacs,gdacsReports],
-    ['ransomware-live','Ransomware.live',endpoints.cyber,cyberReports],
-    ['gdelt-doc','GDELT worldwide news',newsURL(newsTopics),newsReports],
+    ['ransomlook','RansomLook',endpoints.cyber,(data,now)=>claimReports(data,now,false)],
+    ['ransomposts','RansomPosts (Ransomware.live data)',endpoints.ransomPosts,(data,now)=>claimReports(data,now,true)],
+    rssSource('bing',newsTopics),
+    ['incident-tracker','Global Incident Tracker',endpoints.tracker,trackerReports],
   ];
-  let newsStarted = 0;
   async function check([id,name,url,parse]:Source) {
     try {
-      if (id.startsWith('gdelt')) newsStarted = Date.now();
-      const list = parse(await readJSON(url,deadline), Date.now());
+      const list = parse(await readBody(url,deadline,{},/^(?:bing|google)-/.test(id)), Date.now());
       coverage.push({id,name,url,status:'ok',checkedAt:new Date().toISOString(),retained:list.length});
       return list;
     } catch (e) {
@@ -327,14 +370,20 @@ export async function runResearch() {
     }
   }
   const pools = await parallel(sources,3,check);
+  if (!coverage.some(c=>c.id==='bing-news' && c.retained>0)) {
+    pools.push(...await parallel<Source,Report[]>([rssSource('google',newsTopics),
+      ['gdelt-doc','GDELT worldwide news',newsURL(newsTopics),newsReports]],2,check));
+  }
   if (coverage.every(c=>c.status==='unavailable')) throw Error('All public discovery sources are unavailable.');
   const decide=planner(deadline);
   const initial=shortlist(pools);
   const options=initial.length ? choicesFor(initial) : alternateQueries;
   const plan=await decide(options,coverage), query=options[plan.follow].query;
-  const spacing = 5300-(Date.now()-newsStarted);
-  if (spacing>0) await new Promise(resolve=>setTimeout(resolve,spacing));
-  const found=await check(['gdelt-followup','GDELT event follow-up',newsURL(query),newsReports]);
+  const news=await parallel([rssSource('bing',query,true),rssSource('google',query,true)],2,check);
+  if (!coverage.some(c=>c.id.endsWith('-followup') && c.status==='ok')) {
+    news.push(await check(['gdelt-followup','GDELT event follow-up',newsURL(query),newsReports]));
+  }
+  const found=shortlist(news);
   const candidates = found.length ? shortlist([initial,found]) : initial;
   const selection = found.length && candidates.length ? await decide(choicesFor(candidates),coverage) : plan;
   const reports = candidates.length ? selection.ranked.slice(0,10).map(i=>candidates[i]).filter(Boolean) : [];
