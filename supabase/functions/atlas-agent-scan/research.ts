@@ -31,7 +31,7 @@ type Report = {
 type Coverage = {id: string; name: string; url: string; checkedAt: string; status: 'ok' | 'unavailable'; retained: number; detail?: string};
 type Fields = Record<string, unknown>;
 const fields = (v: unknown): Fields => v && typeof v === 'object' && !Array.isArray(v) ? v as Fields : {};
-const str = (v: unknown, max = 350) => typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, max) : '';
+const str = (v: unknown, max = 350) => typeof v === 'string' ? v.slice(0,max*4).replace(/\s+/g, ' ').trim().slice(0, max) : '';
 function rows(v: unknown, limit: number) {
   if (!Array.isArray(v)) throw Error('Unexpected feed format');
   return v.slice(0, limit).map(fields);
@@ -181,7 +181,9 @@ function rssReports(data:unknown,now:number,engine:'bing'|'google') {
   if (typeof data!=='string' || !/<rss[\s>]/i.test(data) || !/<channel[\s>]/i.test(data) || !/<\/rss>/i.test(data)) throw Error('Unexpected RSS format');
   const tag=(item:string,name:string)=>xmlText(item.match(new RegExp('<'+name+'(?:\\s[^>]*)?>([\\s\\S]*?)<\\/'+name+'>','i'))?.[1] || '').trim();
   const list:Report[]=[];
+  let visited=0;
   for (const match of data.matchAll(/<item(?:\s[^>]*)?>([\s\S]*?)<\/item>/gi)) {
+    if (++visited>100) break;
     const item=match[1], publisher=str(tag(item,'source') || tag(item,'News:Source'),140);
     const rawTitle=str(tag(item,'title'));
     const title=publisher && rawTitle.endsWith(' - '+publisher) ? rawTitle.slice(0,-publisher.length-3) : rawTitle;
@@ -251,7 +253,8 @@ function shortlist(pools: Report[][]) {
   // Round-robin prevents a large tracker response from displacing public news and specialist feeds.
   const bySource = pools.map(p=>p.sort((a,b)=>dated(b).localeCompare(dated(a))));
   const list: Report[] = [], urls = new Map<string,Report>(), titles = new Set<string>(), ids = new Set<string>();
-  for (let i=0; i < Math.max(0,...bySource.map(p=>p.length)); i++) {
+  const depth=Math.min(30,Math.max(0,...bySource.map(p=>p.length)));
+  for (let i=0; i<depth; i++) {
     for (const pool of bySource) {
       const item = pool[i];
       if (!item) continue;
@@ -284,7 +287,7 @@ function vector(value: unknown) {
 async function nativeVectors(texts: string[], deadline: number) {
   if (!runtime.Supabase?.ai?.Session) throw Error('Supabase AI unavailable');
   const session = new runtime.Supabase.ai.Session('gte-small');
-  return await parallel(texts,2,async text=>{
+  return await parallel(texts,1,async text=>{
     const remaining = deadline-Date.now();
     if (remaining<1) throw Error('AI time budget exceeded');
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -294,11 +297,10 @@ async function nativeVectors(texts: string[], deadline: number) {
     } finally { clearTimeout(timer); }
   });
 }
-type Choice = {text:string;query:string};
+type Choice = {text:string;query:string;category?:string;named?:boolean};
 const researchGoal = 'Prioritize active factory fires or shutdowns, named industrial supplier cyber claims, prolonged labor strikes, regional disasters, critical material shortages and blocked freight infrastructure.';
-const background = 'General background, political commentary, consumer advice, hypothetical events, unrelated crime or sports with no industrial or regional hazard.';
 function planner(deadline: number) {
-  const cache = new Map<string,number[]>();
+  let nativeOrder: string[] | undefined;
   let key = runtime.Deno?.env.get('OPENAI_API_KEY');
   return async (choices:Choice[],coverage:Coverage[]) => {
     const gaps = coverage.filter(c=>c.status==='unavailable').map(c=>c.name).join(', ');
@@ -326,21 +328,30 @@ function planner(deadline: number) {
         return {model:'openai/gpt-4.1-mini',ranked,follow};
       } catch { key=undefined; }
     }
-    const prompts=[goal,background,...choices.map(c=>c.text)];
-    const missing=[...new Set(prompts.filter(s=>!cache.has(s)))];
-    try {
-      const fresh=await nativeVectors(missing,deadline);
-      missing.forEach((s,i)=>cache.set(s,fresh[i]));
-    } catch { throw Error('Hosted AI unavailable. The agent could not plan or assess public reports.'); }
-    const [positive,negative,...values]=prompts.map(p=>cache.get(p)!);
-    if (values.some(v=>v.length!==positive.length) || negative.length!==positive.length) throw Error('Inconsistent AI embeddings');
-    const scores=values.map((v,id)=>({id,score:v.reduce((sum,x,j)=>sum+x*(positive[j]-negative[j]),0)}));
-    const ranked=scores.sort((a,b)=>b.score-a.score).map(r=>r.id);
+    // Native ONNX inference consumes the edge worker's CPU allowance. Only the initial
+    // planning step embeds an intent and up to two short leads, once each, in sequence.
+    if (!nativeOrder) {
+      const options=choices.slice().sort((a,b)=>Number(!!b.named)-Number(!!a.named));
+      const first=options[0];
+      const second=options.find(c=>c.query!==first.query && c.category!==first.category) || options.find(c=>c.query!==first.query);
+      const pair=second ? [first,second] : [first];
+      const inputs=pair.map(c=>c.text.split(/\s+/,12).join(' ').slice(0,88));
+      const intent='Prioritize factory closures, industrial ransomware, strikes, freight delays and disasters.';
+      try {
+        const [target,...leads]=await nativeVectors([intent,...inputs],deadline);
+        if (leads.some(v=>v.length!==target.length)) throw Error('Inconsistent AI embeddings');
+        nativeOrder=leads.map((v,i)=>({query:pair[i].query,score:v.reduce((sum,x,j)=>sum+x*target[j],0)}))
+          .sort((a,b)=>b.score-a.score).map(r=>r.query);
+      } catch { throw Error('Hosted AI unavailable. The agent could not plan or assess public reports.'); }
+    }
+    const priority=nativeOrder.map(q=>choices.findIndex(c=>c.query===q)).filter(i=>i>=0);
+    const ranked=[...new Set([...priority,...choices.map((_,i)=>i)])];
     return {model:'supabase/gte-small',ranked,follow:ranked[0]};
   };
 }
 function choicesFor(reports:Report[]):Choice[] {
-  return reports.map(r=>({text:r.title+' '+(r.hazardType || '')+' '+r.summary.slice(0,350),query:queryFor(r)}));
+  return reports.map(r=>({text:r.title+' '+(r.hazardType || '')+' '+r.summary.slice(0,350),query:queryFor(r),
+    category:r.category,named:!!(r.entities?.length || r.searchTerm)}));
 }
 type Source = [string,string,string,(data:unknown,now:number)=>Report[]];
 function rssSource(engine:'bing'|'google',query:string,follow=false): Source {

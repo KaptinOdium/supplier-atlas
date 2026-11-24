@@ -67,6 +67,34 @@ test('a healthy empty feed still triggers a model-selected topic and a fresh sea
   assert(r.sourcesChecked>0 && r.sourcesFailed.length>0);
 });
 
+test('native inference uses at most three short sequential calls across discovery and follow-up', {timeout:2000}, async t=>{
+  const prompts=[], now=new Date(Date.now()-3600000), checkedQueries=[];
+  let active=0, peak=0;
+  runtime(t,async u=>{
+    if (u.hostname==='www.ransomlook.io') return Response.json(Array.from({length:24},(_,i)=>({
+      post_title:'Example Circuits '+i,group_name:'Example Group',discovered:now.toISOString()
+    })));
+    if (u.hostname==='www.bing.com') {
+      const q=u.searchParams.get('q'); checkedQueries.push(q);
+      const topic=q.includes('Example Circuits') ? 'Followup' : 'Discovery';
+      return rss(Array.from({length:24},(_,i)=>'<item><title>'+topic+' industrial plant fire '+i+
+        '</title><link>https://example.com/'+topic+'/'+i+'</link><pubDate>'+now.toUTCString()+'</pubDate></item>').join(''));
+    }
+    if (u.hostname==='news.google.com') return rss();
+    return unavailable();
+  },async s=>{
+    prompts.push(s); peak=Math.max(peak,++active);
+    await new Promise(resolve=>setTimeout(resolve,2)); active--;
+    return s.startsWith('Prioritize') || s.includes('Example Circuits') ? [1,0] : [0,1];
+  });
+  const result=await runResearch();
+  assert.equal(prompts.length,3); assert.equal(peak,1);
+  assert(prompts.every(s=>s.length<=110 && s.split(/\s+/).length<=15));
+  assert(checkedQueries.some(q=>q.includes('Example Circuits')));
+  assert(result.reports.some(r=>r.title.startsWith('Followup')));
+  assert.equal(result.reports.length,10);
+});
+
 test('the configured chat model chooses an allowlisted search without sharing its credential with sources',async t=>{
   let ran=false;
   runtime(t,async (u,init)=>{
