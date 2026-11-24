@@ -1,8 +1,8 @@
 # Supplier Atlas
 
-Supplier Atlas screens the entire shared supplier list when an invited member opens the workspace or selects **Scan all suppliers**. The map and supplier table initially show suppliers with yellow or red signals. Clear **Yellow or red only** to see the full list. Changing the view preserves the scope of the next scan.
+Select **Scan all suppliers** to start a new research run. The Atlas agent checks public sources, follows up on leads, and saves dated reports with their evidence links. The browser matches those reports against the entire shared supplier list. Opening the workspace retrieves your latest successful agent run alongside the existing feeds. The map and supplier table initially show suppliers with yellow or red signals. Clear **Yellow or red only** to see the full list.
 
-Atlas checks Global Incident Tracker, GDACS and recent industry reports. Industry reports cover production incidents, labor action, logistics disruption, operational cyber incidents, product quality and recalls, and financial distress. The public feed refreshes three times daily. The **Industry reports** section lets members browse by risk type, including reports without a supplier match.
+The **Industry reports** section includes production incidents, labor action, logistics disruption, cyber incidents, recalls and financial distress. You can browse the evidence even when there is no supplier match. The scheduled public feed refreshes three times daily. Each manual scan also checks live sources and identifies any that were unavailable.
 
 Atlas compares public evidence with the shared supplier list in the browser. Owners also scan the saved project register. A member can include a reviewed JSON register in the current tab. Each scan shows which sources returned evidence, when saved records were reviewed and which feeds were unavailable. A yellow signal marks a site for review. A red signal requires recent evidence of an active operational disruption at the named site.
 

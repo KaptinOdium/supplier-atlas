@@ -23,7 +23,8 @@ class Element {
   showModal(){this.open=true;}
   close(){this.open=false;}
 }
-async function fixture({configuredService=true,role='owner',loadFailure=false,cityPartCount=1,failedCityPart=null,detailedMap=false,deferMap=false,teardownFailure=false,assess=()=>"",hazardLoad=async()=>{throw Error("Unavailable");},gdacsLoad=async()=>{throw Error("Unavailable");},opsLoad=async()=>{throw Error("Unavailable");},sharedRows=[],projectLoad=async()=>null}={}){
+async function fixture({configuredService=true,role='owner',loadFailure=false,cityPartCount=1,failedCityPart=null,detailedMap=false,deferMap=false,teardownFailure=false,assess=()=>"",hazardLoad=async()=>{throw Error("Unavailable");},gdacsLoad=async()=>{throw Error("Unavailable");},opsLoad=async()=>{throw Error("Unavailable");},sharedRows=[],projectLoad=async()=>null,
+  agentLoad=async({start})=>start ? {checkedAt:new Date().toISOString(),sourcesChecked:2,sourcesFailed:[],model:'test',reports:[]} : null}={}){
   const nodes=new Map([...html.matchAll(/id="([^"]+)"/g)].map(m=>[m[1],new Element(m[1])]));
   nodes.get('onlyFlagged').checked=/<input id="onlyFlagged"[^>]*\bchecked\b/.test(html);
   nodes.get('workspaceMain').hidden=true;nodes.get('loginForm').hidden=true;
@@ -44,6 +45,7 @@ async function fixture({configuredService=true,role='owner',loadFailure=false,ci
     async signIn(email,password){if(password!=='valid-password')throw new AccessError('Sign-in failed.');return {id:'member',email,name:'Test member',role};}
     async signOut(){this.session=null;}
     async loadScreeningRegister(){return projectLoad();}
+    async loadAgentScan(options){return agentLoad(options);}
     async verify(){return {id:'member',email:'member@example.com',name:'Test member',role};}
     async loadShared(){if(loadFailure)throw Error('Service unavailable.');return structuredClone(dataset);}
     async saveShared(rows,revision){saves++;assert.equal(revision,dataset.revision);dataset.suppliers=structuredClone(rows);dataset.revision++;return structuredClone(dataset);}
@@ -399,4 +401,91 @@ test('one scan displays industry coverage without requiring a supplier match and
   assert.equal(calls,1);
   await f.nodes.get('logoutButton').onclick();
   assert.equal(nodeText(feed),'');assert.equal(f.nodes.get('industryStatus').textContent,'');
+});
+
+test('one deliberate click runs the agent, merges current reports and restores the last success after reload',async()=>{
+  const stamp=new Date(Date.now()-60000).toISOString();
+  const active={id:'one',category:'production',title:'Atlas Precision factory fire halts production',
+    publishedAt:stamp,url:'https://example.org/factory',publisher:'Factory operator',entities:['Atlas Precision'],country:'Czechia',locality:'Brno'};
+  const regional={id:'two',category:'regional',hazardType:'flood',title:'Flood watch for Brno',dateBasis:'updated',updatedAt:stamp,
+    url:'https://example.org/flood',publisher:'Regional authority',country:'Czechia',locality:'Brno'};
+  const publicOnly={id:'three',category:'production',title:'Foreign plant closure',publishedAt:stamp,publisher:'Company',
+    url:'https://example.org/foreign',summary:'A restart date has not been announced.',
+    evidence:[{name:'Local authority',url:'https://example.org/response',date:stamp,dateBasis:'updated'}]};
+  let latest=null,finish,startCount=0,readCount=0;
+  const options={role:'viewer',sharedRows:[supplierRow('s1','Atlas Precision')],
+    agentLoad:async({start})=>{
+      if (!start) {readCount++;return latest;}
+      startCount++; await new Promise(resolve=>finish=resolve);
+      latest={checkedAt:stamp,sourcesChecked:5,sourcesFailed:['Feed B'],model:'test-model',reports:[active,regional,publicOnly]};return latest;
+    },
+    opsLoad:async()=>({matches:[],items:[active],coverage:'Public snapshot',checkedAt:stamp})};
+  const f=await fixture(options);
+  await f.login('valid-password');await settled();
+  assert.equal(readCount,1);assert.equal(startCount,0);
+  const button=f.nodes.get('refreshScreening'), click=button.onclick();
+  assert.equal(button.disabled,true);assert.match(f.nodes.get('agentStatus').textContent,/in progress/);
+  await button.onclick();assert.equal(startCount,1);
+  finish();await click;assert.equal(button.disabled,false);
+  assert.match(f.nodes.get('agentStatus').textContent,/Agent scan completed.*Prague.*5 sources checked.*3 reports returned.*Feed B/);
+  assert.match(openEvidence(f),/Atlas Precision factory fire halts production/);
+  assert.match(openEvidence(f),/Flood watch for Brno/);
+  assert.equal(f.nodes.get('industryList').children.length,3);
+  assert.match(nodeText(f.nodes.get('industryList')),/Updated /);
+  assert.match(nodeText(f.nodes.get('industryList')),/A restart date has not been announced/);
+  assert.ok(descendants(f.nodes.get('industryList')).some(n=>n.href==='https://example.org/response'));
+  assert.match(nodeText(f.nodes.get('screeningSources')),/test-model/);
+  const back=await fixture(options);await back.login('valid-password');await settled();
+  assert.equal(readCount,2);assert.equal(startCount,1);
+  assert.match(back.nodes.get('agentStatus').textContent,/Last agent scan/);
+  assert.match(openEvidence(back),/Atlas Precision factory fire/);
+});
+
+test('an empty agent result, an unsuccessful attempt, and signout have distinct visible states',async()=>{
+  const f=await fixture({role:'viewer',sharedRows:[supplierRow('s1','Atlas Precision')],agentLoad:async({start})=>{
+    if (!start) return {checkedAt:new Date().toISOString(),sourcesChecked:3,sourcesFailed:[],model:'test-model',reports:[]};
+    throw Error('No public sources responded.');
+  }});
+  await f.login('valid-password');await settled();
+  assert.match(f.nodes.get('agentStatus').textContent,/Last agent scan.*3 sources checked.*0 reports returned/);
+  await f.nodes.get('refreshScreening').onclick();
+  assert.match(f.nodes.get('agentStatus').textContent,/Agent scan failed.*No public sources responded.*last successful scan/);
+  assert.equal(f.nodes.get('refreshScreening').disabled,false);
+  await f.nodes.get('logoutButton').onclick();
+  assert.equal(f.nodes.get('agentStatus').textContent,'');
+});
+
+test('agent screening keeps named cyber claims yellow and current strike notices visible',async()=>{
+  const now=Date.now(), recent=new Date(now-600000).toISOString(), older=new Date(now-4*86400000).toISOString();
+  const future=new Date(now+2*86400000).toISOString().slice(0,10);
+  const claim={id:'claim',category:'cyber',title:'Atlas Precision named in ransomware claim',confirmation:'unverified claim',
+    entities:['Atlas Precision'],country:'Czechia',publisher:'Cyber tracker',url:'https://example.org/claim',dateBasis:'first-seen',
+    seenAt:recent,summary:'Operations and deliveries are unconfirmed.'};
+  const strike={id:'strike',category:'labor',title:'Machinists announce a 24-hour plant strike',publisher:'Union',url:'https://example.org/strike',
+    publishedAt:older,eventStart:future,eventEnd:future,eventStatus:'announced'};
+  const f=await fixture({role:'viewer',sharedRows:[supplierRow('s1','Atlas Precision GmbH'),supplierRow('s2','Another Precision')],
+    agentLoad:async()=>({checkedAt:recent,sourcesChecked:3,sourcesFailed:[],model:'test',reports:[claim,strike]})});
+  await f.login('valid-password');await settled();
+  assert.match(f.nodes.get('scanStatus').textContent,/0 red · 1 yellow/);
+  const details=openEvidence(f);
+  assert.match(details,/unverified claim/);assert.match(details,/Operations and deliveries are unconfirmed/);
+  assert.doesNotMatch(details,/Another Precision/);
+  assert.match(nodeText(f.nodes.get('industryList')),/Machinists announce a 24-hour plant strike/);
+});
+
+test('a member with an empty register can start the agent while passive loading is pending',async()=>{
+  let finishLoad,posts=0;
+  const fresh={id:'plant',category:'production',title:'Factory fire reported',publishedAt:new Date().toISOString(),
+    publisher:'Operator',url:'https://example.org/plant'};
+  const f=await fixture({sharedRows:[],agentLoad:async({start})=>{
+    if(!start) return new Promise(resolve=>finishLoad=resolve);
+    posts++;return {checkedAt:new Date().toISOString(),sourcesChecked:2,sourcesFailed:[],model:'test',reports:[fresh]};
+  }});
+  await f.login('valid-password');
+  const button=f.nodes.get('refreshScreening');
+  assert.equal(button.disabled,false);await button.onclick();assert.equal(posts,1);
+  finishLoad(null);await settled();
+  assert.match(f.nodes.get('scanStatus').textContent,/No suppliers loaded/);
+  assert.match(f.nodes.get('agentStatus').textContent,/Agent scan completed/);
+  assert.match(nodeText(f.nodes.get('industryList')),/Factory fire reported/);
 });

@@ -2,6 +2,7 @@ const SESSION_KEY = 'supplier-atlas-auth-v1';
 const ALLOWED_ROLES = new Set(['owner', 'editor', 'viewer']);
 export class AccessError extends Error {}
 export class ConflictError extends Error {}
+class ConnectionError extends Error {}
 
 export function consumeAccountLink(href, replace) {
   const url = new URL(href);
@@ -87,7 +88,7 @@ export class AuthClient {
     try { this.storage?.setItem(SESSION_KEY, JSON.stringify(this.session)); } catch {}
   }
 
-  async request(path, { method = 'GET', body, token } = {}) {
+  async request(path, { method = 'GET', body, token, signal } = {}) {
     const headers = { apikey: this.config.key };
     if (token) headers.Authorization = 'Bearer ' + token;
     if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -95,9 +96,13 @@ export class AuthClient {
     try {
       response = await this.fetcher(this.config.url + path, {
         method, headers, body: body === undefined ? undefined : JSON.stringify(body),
-        credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(15000)
+        credentials: 'omit', cache: 'no-store',
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000)
       });
-    } catch { throw new Error('The account service is unavailable. Try again shortly.'); }
+    } catch {
+      signal?.throwIfAborted();
+      throw new ConnectionError('The account service is unavailable. Try again shortly.');
+    }
     let data = null;
     try { data = await response.json(); } catch {}
     if (!response.ok) {
@@ -114,10 +119,14 @@ export class AuthClient {
           (response.status === 400 && path === '/auth/v1/token?grant_type=refresh_token')) {
         throw new AccessError('Sign-in expired or this account has no access.');
       }
+      if (path === '/functions/v1/atlas-agent-scan' && typeof data?.error === 'string')
+        throw new Error(data.error.slice(0, 300));
       throw new Error(path.startsWith('/auth/v1/token')
         ? 'Sign-in failed. Check your email and password.'
         : 'The request could not be completed. Try again shortly.');
     }
+    if (path === '/functions/v1/atlas-agent-scan' && response.status !== 204 && data === null)
+      throw new Error('The scan service returned an unreadable result.');
     return data;
   }
 
@@ -249,6 +258,49 @@ export class AuthClient {
       throw new Error('The screening register could not be read.');
     }
     return register;
+  }
+
+  async loadAgentScan({start = false, signal} = {}) {
+    const generation = this.generation;
+    const requestId = start ? crypto.randomUUID() : null;
+    const deadline = AbortSignal.timeout(300000);
+    const active = signal ? AbortSignal.any([deadline, signal]) : deadline;
+    let retried = false;
+    try {
+      for (;;) {
+        active.throwIfAborted();
+        const token = await this.token();
+        this.assertCurrent(generation);
+        let job;
+        try {
+          job = await this.request('/functions/v1/atlas-agent-scan', {
+            method: start ? 'POST' : 'GET', body: start ? {requestId} : undefined, token, signal: active
+          });
+        } catch (error) {
+          if (!start || retried || !(error instanceof ConnectionError)) throw error;
+          retried = true;
+          continue;
+        }
+        this.assertCurrent(generation);
+        if (!start && job === null) return null;
+        if (job?.status === 'failed') throw new Error(job.error || 'The agent scan failed.');
+        if (job?.status === 'succeeded') {
+          const result = job.result;
+          if (!Array.isArray(result?.reports) || !Number.isSafeInteger(result.sourcesChecked) || result.sourcesChecked < 0 ||
+              !Array.isArray(result.sourcesFailed) || !result.sourcesFailed.every(name => typeof name === 'string') ||
+              typeof result.model !== 'string' || !result.model.trim() || typeof result.checkedAt !== 'string' ||
+              !Number.isFinite(Date.parse(result.checkedAt))) {
+            throw new Error('The agent returned an invalid scan result.');
+          }
+          return result;
+        }
+        if (!start || job?.status !== 'running') throw new Error('The scan service returned an unexpected response.');
+        await new Promise(resolve => setTimeout(resolve, 3000));
+      }
+    } catch (error) {
+      if (deadline.aborted) throw new Error('The scan is still unconfirmed. Reload to check the latest completed result.');
+      throw error;
+    }
   }
 
   async saveShared(rows, revision) {

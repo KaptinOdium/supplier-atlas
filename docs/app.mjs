@@ -1,15 +1,15 @@
 import {norm,parseSuppliers,csvExport,point} from './core.mjs';
-import {AuthClient,configured,AccessError,ConflictError} from './auth-core.mjs?v=20261118-1';
+import {AuthClient,configured,AccessError,ConflictError} from './auth-core.mjs?v=20261124-1';
 import {setIdentity} from './auth-state.mjs';
 import {createSupplierMap} from './map-view.mjs?v=20261123-1';
 const $=id=>document.getElementById(id),NS='http://www.w3.org/2000/svg';let lastLookupAt=0;let rows=[],world=[],cities=[],cityIndex=new Map(),countryIndex=new Map(),cache=new Map(),selected=null,busy=false,cancel=false,view=[0,0,1000,500];
 let auth=null,identity=null,revision=0,dirty=false,saving=false,loading=false,loaded=false,epoch=0,checking=false,lookupAbort=null;
 let detailMap=null,detailReady=false,mapAttempt=0,mapAbort=null;
-import {createScreeningPanel} from './screening-panel.mjs?v=20261123-1';
+import {createScreeningPanel} from './screening-panel.mjs?v=20261124-1';
 import {readPrivateRegister} from './screen-register.mjs';
 import {loadHazardLeads} from './screen-hazards.mjs?v=20261123-1';
 import {loadGdacs} from './screen-gdacs.mjs?v=20261123-1';
-import {loadOperationalLeads} from './screen-operations.mjs';
+import {loadOperationalLeads} from './screen-operations.mjs?v=20261124-1';
 import {projectAssessment} from './screen-policy.mjs';
 import {matchSuppliers} from './screen-matches.mjs?v=20261118-3';
 let signalsById = new Map(), screeningState = 'idle', registerPage = 0;
@@ -21,7 +21,7 @@ const levelOrder = {red:2, yellow:1, neutral:0};
 const screeningPanel = createScreeningPanel({
   document, readPrivateRegister, matchSuppliers, countryCode:getCode,
   loadHazardLeads, loadGdacs, loadOperationalLeads, projectAssessment, canReadProject: () => identity?.role === 'owner',
-  onSignals: updateSignals, onShowMap: focusSupplier,
+  onSignals: updateSignals, onShowMap: focusSupplier, loadAgentScan: options => auth.loadAgentScan(options),
   loadProject: () => identity?.role === 'owner' ? auth.loadScreeningRegister() : null
 });
 const canEdit=()=>identity&&['owner','editor'].includes(identity.role);

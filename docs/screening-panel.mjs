@@ -1,16 +1,18 @@
 import {summarizeSignals} from './screen-signals.mjs';
 import {decisionNames} from './screen-policy.mjs';
-import {createReportView, riskNames, riskType, setRiskOptions} from './risk-view.mjs';
+import {createReportView, riskNames, riskType, setRiskOptions} from './risk-view.mjs?v=20261124-1';
+import {matchOperationalReports} from './screen-operations.mjs?v=20261124-1';
 
 const signalLabels = { red: 'Active site incident', yellow: 'Needs review' };
 const projectSource = 'Project register';
 const operationsSource = 'Industry reports';
+const agentSource = 'Agent scan';
 const dayFormat = new Intl.DateTimeFormat('en-CA', {timeZone:'Europe/Prague', year:'numeric', month:'2-digit', day:'2-digit'});
 const timeFormat = new Intl.DateTimeFormat('en-GB', {timeZone:'Europe/Prague', dateStyle:'medium', timeStyle:'short'});
 const number = value => value.toLocaleString('en-US');
 
 export function createScreeningPanel({document, loadProject, readPrivateRegister, matchSuppliers,
-  countryCode, loadHazardLeads, loadGdacs, loadOperationalLeads, canReadProject, projectAssessment, onSignals = () => {}, onShowMap}) {
+  countryCode, loadHazardLeads, loadGdacs, loadOperationalLeads, loadAgentScan, canReadProject, projectAssessment, onSignals = () => {}, onShowMap}) {
   const get = id => document.getElementById(id);
   const node = (tag, text, cls) => {
     const item = document.createElement(tag);
@@ -23,13 +25,14 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
   const findingsFilter = get('findingsFilter'), renderReports = createReportView(document);
   let rows = null, sourceRuns = [], localRegister = null, localName = '', localResult = null, groups = [], completed = null;
   let generation = 0, fileGeneration = 0, busy = false, activePolicy = null;
+  let latestAgent = null, pendingAgent = null, agentController = new AbortController(), manualScan = false;
   let visibleLimit = 40;
   const disclosures = new Map();
   let displayed = [];
 
   function controls() {
-    button.disabled = !rows?.length || busy;
-    button.textContent = busy ? 'Scanning…' : 'Scan all suppliers';
+    button.disabled = !rows || manualScan;
+    button.textContent = manualScan ? 'Scanning…' : 'Scan all suppliers';
     fileInput.disabled = !rows?.length;
     removeFile.hidden = !localRegister;
     removeFile.disabled = !rows?.length;
@@ -70,6 +73,7 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
     const phase = run.state === 'ready' ? run.date || 'Checked' : run.state === 'loading' ? 'Checking…' : 'Unavailable';
     section.append(node('summary',run.name + ' · ' + phase));
     if (run.note) section.append(node('p',run.note));
+    if (run.model) section.append(node('small','Scan model · '+run.model));
     if (run.sources?.length) {
       const list = node('ul');
       for (const source of run.sources) safeLink(list,{
@@ -99,6 +103,8 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
     const item = node('article',undefined,'scan-incident');
     item.append(node('b',event.title || event.company || 'Screened event'));
     item.append(node('small',[riskNames[riskType(event)],source,event.date,event.site || event.country].filter(Boolean).join(' · ')));
+    if(event.confirmation) item.append(node('small',event.confirmation));
+    if(event.summary) item.append(node('p',event.summary));
     const label = decisionNames[decision] || decision;
     item.append(node('p',[label,reason].filter(Boolean).join(' — ')),node('p',basis));
     const assessment = activePolicy && projectAssessment?.(match,activePolicy,today);
@@ -176,11 +182,51 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
       matches:matchSuppliers(suppliers,register,dayFormat.format(new Date()),countryCode)};
   }
 
+  async function agentRun(start, suppliers) {
+    const controller = agentController;
+    if (start && !pendingAgent) pendingAgent=loadAgentScan({start:true,signal:controller.signal})
+      .finally(() => { if (controller === agentController) pendingAgent = null; });
+    let result = null, failure = '';
+    try {
+      result = await (pendingAgent || loadAgentScan({start:false,signal:controller.signal}));
+      if (controller === agentController && result && (!latestAgent || Date.parse(result.checkedAt)>=Date.parse(latestAgent.checkedAt)))
+        latestAgent=result;
+    }
+    catch (error) {
+      failure = 'Agent scan ' + (start ? 'failed' : 'could not be loaded') + '. ' + error.message;
+      if (!latestAgent) return {name:agentSource,state:'unavailable',note:failure};
+      result = latestAgent;
+    }
+    if (!result) return {name:agentSource,state:'empty',note:'Start a scan to check current sources.'};
+    const {matches,items} = matchOperationalReports(suppliers,result.reports,{checkedAt:result.checkedAt,countryCode,agent:true});
+    const stamp = timeFormat.format(new Date(result.checkedAt))+' Prague';
+    const label = failure ? ' Showing the last successful scan' : start ? 'Agent scan completed' : 'Last agent scan';
+    const summary = label+' '+stamp+' · '+number(result.sourcesChecked)+' sources checked · '+number(result.reports.length)+' reports returned';
+    const partial = !!(result.sourcesFailed.length || failure);
+    const note = failure+summary+(result.sourcesFailed.length ? ' · Unavailable sources include '+result.sourcesFailed.join(', ') : '')+'.';
+    return {name:agentSource,state:'ready',date:stamp,checkedAt:result.checkedAt,note,model:result.model,partial,matches,items,
+      sources:Array.isArray(result.coverage) ? result.coverage.filter(s=>s && typeof s.name==='string') : []};
+  }
+
+  function industryReports(runs) {
+    const scheduled = runs.find(run=>run.name===operationsSource), agent = runs.find(run=>run.name===agentSource);
+    if (agent?.state !== 'ready') return scheduled;
+    if (scheduled?.state !== 'ready') return {...agent,date:agent.checkedAt};
+    const urls = new Set(), titles = new Set();
+    const items = [...agent.items,...(scheduled.items || [])].filter(report => {
+      const title = report.title.trim().toLowerCase();
+      if (urls.has(report.url) || titles.has(title)) return false;
+      urls.add(report.url);titles.add(title);return true;
+    });
+    const date = Date.parse(scheduled.date) > Date.parse(agent.checkedAt) ? scheduled.date : agent.checkedAt;
+    return {state:'ready',date,items};
+  }
+
   function render() {
     sources.replaceChildren();
-    if (!rows?.length) {
-      status.textContent = rows ? 'Import or load a supplier list to scan.' : '';
-      coverage.textContent='';results.replaceChildren();disclosures.clear();groups=[];displayed=[];
+    if (!rows) {
+      status.textContent = '';
+      get('agentStatus').textContent='';coverage.textContent='';results.replaceChildren();disclosures.clear();groups=[];displayed=[];
       setRiskOptions(findingsFilter,new Map(),document);renderReports(null);onSignals(groups,{state:'idle'});return;
     }
     const runs=[...sourceRuns];
@@ -188,8 +234,10 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
       localResult ??= registerResult(localName,localRegister,rows,'Private register loaded in this tab.');
       runs.push(localResult);
     }
-    for(const run of runs)sources.append(sourceDetail(run));
-    renderReports(runs.find(run=>run.name===operationsSource));
+    for(const run of runs) if(run.state!=='empty') sources.append(sourceDetail(run));
+    const agent = runs.find(run=>run.name===agentSource);
+    get('agentStatus').textContent = agent?.note || '';
+    renderReports(industryReports(runs));
     const owner=canReadProject();
     sources.append(node('p',owner
       ? 'Private and manually reviewed sources use saved evidence. Only the public feeds are refreshed during this scan.'
@@ -207,41 +255,45 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
     }
     setRiskOptions(findingsFilter,counts,document);
     const red=groups.filter(group=>group.level==='red').length, yellow=groups.length-red;
-    if(busy) {
+    if (!rows.length) {
+      status.textContent='No suppliers loaded for matching.';
+    } else if(busy) {
       status.textContent='Checking '+number(rows.length)+' suppliers…';
     } else if (ready.length) {
       status.textContent=number(rows.length)+' suppliers scanned · '+number(red)+' red · '+number(yellow)+' yellow'+
         (completed?' · '+timeFormat.format(completed)+' Prague':'');
     } else status.textContent='Scan unavailable. Try scanning again.';
-    const limited=runs.filter(run=>run.state==='ready' && /unavailable|fallback|partial|snapshot|only the returned sample/i.test(run.note || ''));
+    const limited=runs.filter(run=>run.state==='ready' && (run.partial || /unavailable|fallback|partial|snapshot|only the returned sample/i.test(run.note || '')));
     coverage.textContent=failure.length?'Partial coverage · '+failure.map(run=>run.name).join(', ')+' unavailable.':
       owner ? 'Partial coverage · private sources use saved reviews' : limited.length ? 'Limited public feed coverage' : 'Public feed coverage';
     renderResults(today);
-    if(!groups.length && !busy && ready.length)results.append(node('p','No supplier signals in the sources checked.','scan-empty'));
+    if(rows.length && !groups.length && !busy && ready.length)results.append(node('p','No supplier signals in the sources checked.','scan-empty'));
     const state = busy ? 'scanning' : !ready.length ? 'unavailable' : failure.length || limited.length ? 'partial' : 'complete';
     onSignals(groups,{state});
   }
 
   async function scan(force=false) {
-    if (!rows?.length || busy) return;
+    if (!rows || busy && (!force || manualScan)) return;
     const serial=++generation, owner=canReadProject(), supplierRows=rows;
-    busy=true;activePolicy=null;completed=null;visibleLimit=40;localResult=null;
+    busy=true;manualScan=force || !!pendingAgent;activePolicy=null;completed=null;visibleLimit=40;localResult=null;
     const work=[];
-    if(owner) {
+    work.push([agentSource,()=>agentRun(force,supplierRows)]);
+    if(owner && rows.length) {
       work.push([projectSource,async()=>{
         const register=await loadProject();
         if(!register) throw Error('No project register has been saved.');
         return registerResult(projectSource,register,supplierRows,'Saved project reviews. Open a source below for its latest documented check.');
       }]);
     }
-    for(const [name,load] of [[operationsSource,loadOperationalLeads],['Global Incident Tracker',loadHazardLeads],['GDACS',loadGdacs]]) {
+    const feeds = rows.length || force ? [[operationsSource,loadOperationalLeads],['Global Incident Tracker',loadHazardLeads],['GDACS',loadGdacs]] : [];
+    for(const [name,load] of feeds) {
       work.push([name,async()=>{
         const payload=await load(supplierRows,{countryCode,force});
         return {name,state:'ready',date:payload.checkedAt,note:payload.coverage,sourceURL:payload.sourceURL,matches:payload.matches,
           items:payload.items,sources:payload.sources};
       }]);
     }
-    sourceRuns=work.map(([name])=>({name,state:'loading'}));controls();render();
+    sourceRuns=work.map(([name])=>({name,state:'loading',note:name===agentSource && force ? 'Agent scan in progress…' : ''}));controls();render();
     await Promise.all(work.map(async([name,load],i)=>{
       let result;
       try { result=await load(); }
@@ -251,21 +303,22 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
       if(sourceRuns.some(run=>run.state==='loading')) render();
     }));
     if(serial!==generation || supplierRows!==rows || owner!==canReadProject())return;
-    busy=false;completed=new Date();controls();render();
+    busy=false;manualScan=false;completed=new Date();controls();render();
   }
 
   function clearFile() {
     fileGeneration++;localName='';localRegister=null;localResult=null;fileInput.value='';get('registerStatus').textContent='';
   }
   function reset() {
+    agentController.abort();agentController=new AbortController();latestAgent=null;pendingAgent=null;manualScan=false;
     generation++;rows=null;busy=false;completed=null;activePolicy=null;sourceRuns=[];clearFile();controls();render();
   }
   function setRows(next) {
     if(next===rows)return;
-    generation++;fileGeneration++;rows=next;sourceRuns=[];activePolicy=null;busy=false;completed=null;visibleLimit=40;
+    generation++;fileGeneration++;rows=next;sourceRuns=[];activePolicy=null;busy=false;manualScan=false;completed=null;visibleLimit=40;
     get('registerStatus').textContent='';fileInput.value='';
     controls();
-    if(rows?.length) void scan(); else render();
+    if(rows) void scan(); else render();
   }
 
   fileInput.onchange=async e=>{

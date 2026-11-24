@@ -1,4 +1,5 @@
 import {countryName, entityName, words} from './screen-matches.mjs';
+import {reportTimestamp} from './risk-view.mjs?v=20261124-1';
 
 export const operationalSourceURL = 'https://raw.githubusercontent.com/KaptinOdium/supplier-atlas/main/docs/data/operational-risks.json';
 const localSnapshot = './data/operational-risks.json';
@@ -31,16 +32,16 @@ const shortNumber = '(\\d+|one|two|three|four|five|six|seven|eight|nine|ten|elev
 const durationFirst = new RegExp('\\b'+shortNumber+' (?:hours?|hrs?) (?:long )?(?:(?:rail|dock|port|factory|warning) )?(?:strike|walkout|stoppage)\\b');
 const durationLast = new RegExp('\\b(?:strike|walkout|stoppage) (?:for |lasting |of )?'+shortNumber+' (?:hours?|hrs?)\\b');
 
-function safeURL(value) {
+function safeURL(value, allowHTTP=false) {
   try {
     const url = new URL(value);
-    if (url.protocol === 'https:' && !url.username && !url.password) return url.href;
+    if ((url.protocol === 'https:' || allowHTTP && url.protocol==='http:') && !url.username && !url.password) return url.href;
   } catch {}
   return '';
 }
-function recent(value, now) {
+function recent(value, now, age=maxAge) {
   const time = typeof value === 'string' && Date.parse(value);
-  return Number.isFinite(time) && time <= now && time >= now-maxAge;
+  return Number.isFinite(time) && time <= now && time >= now-age;
 }
 function usableTitle(title, category) {
   const normalized = words(title);
@@ -109,7 +110,8 @@ function candidates(item, index, countryCode) {
   const title = ' '+words(item.title)+' ';
   // A headline naming a victim can prompt research. Supplier flags need a
   // reported operational effect, such as interrupted production or deliveries.
-  if (item.category==='cyber' && !(cyberService.test(title) && cyberDisruption.test(title))) return [];
+  const claim = item.category==='cyber' && item.confirmation==='unverified claim' && item.entities.length>0;
+  if (item.category==='cyber' && !claim && !(cyberService.test(title) && cyberDisruption.test(title))) return [];
   const country = item.country ? countryName(item.country,countryCode) : '';
   const city = words(item.locality);
   const entities = new Set(item.entities.map(legalName).filter(Boolean));
@@ -127,7 +129,7 @@ function candidates(item, index, countryCode) {
     if (country && registeredCountry !== country || city && registeredCity !== city) continue;
     const sameCity = !!registeredCity && (city === registeredCity || cityAtSite(title,registeredCity));
     const exact = entities.size ? entities.has(name) : isDistinct(name) && affectedMention(title,name);
-    const shortened = !exact && sameCity && alias && (entities.size ? entities.has(alias) : affectedMention(title,alias));
+    const shortened = !claim && !exact && sameCity && alias && (entities.size ? entities.has(alias) : affectedMention(title,alias));
     if (!exact && !shortened) continue;
     // "At <company>" identifies an employer; "at <city> plant" identifies a branch.
     const otherLocation = locations.some(part => !part.startsWith(name+' ') && !(alias && part.startsWith(alias+' ')));
@@ -155,37 +157,82 @@ function sourceStatuses(data,now) {
     .map(s => ({id:s.id,name:s.name,url:safeURL(s.url),status:recent(s.checkedAt,now) ? s.status : 'unavailable',checkedAt:s.checkedAt,
       received:Number.isSafeInteger(s.received) ? s.received : 0,retained:Number.isSafeInteger(s.retained) ? s.retained : 0}));
 }
-export function matchOperationalLeads(suppliers, data, {now=Date.now(), countryCode}={}) {
-  if (!validFeed(data,now)) throw Error('The operational news feed is unavailable or older than three days.');
-  const sources = sourceStatuses(data,now);
-  if (!sources.some(s=>s.status==='ok')) throw Error('Operational news sources are unavailable.');
+export function matchOperationalReports(suppliers, reports, {checkedAt, now=Date.now(), countryCode, agent=false}) {
   const index = supplierIndex(suppliers,countryCode);
   const matches = [], items = [], ids = new Set(), links = new Set(), titles = new Set();
-  for (const report of data.reports) {
+  const today=new Date(now).toISOString().slice(0,10);
+  for (const report of reports) {
+    const regional = agent && report?.category === 'regional';
     if (!report || typeof report.id !== 'string' || !report.id || typeof report.title !== 'string' ||
-        !categories.has(report.category) || typeof report.publisher !== 'string' || !report.publisher.trim()) continue;
-    const firstSeen = report.dateBasis === 'first-seen', time = firstSeen ? report.seenAt : report.publishedAt;
-    const url = safeURL(report.url);
+        (!regional && !categories.has(report.category)) || typeof report.publisher !== 'string' || !report.publisher.trim()) continue;
+    const firstSeen = report.dateBasis === 'first-seen';
+    const dateField = firstSeen ? 'seenAt' : agent && report.dateBasis === 'updated' ? 'updatedAt' :
+      agent && report.dateBasis === 'event-time' ? 'occurredAt' : 'publishedAt';
+    const time = report[dateField];
+    const reportTime = dateField === 'publishedAt' ? {publishedAt:time} : {dateBasis:report.dateBasis,[dateField]:time};
+    const url = safeURL(report.url,agent);
     const titleKey = words(report.title);
-    if (!recent(time,now) || !url || ids.has(report.id) || links.has(url) || titles.has(titleKey) || !usableTitle(report.title,report.category)) continue;
-    const item = {id:report.id,title:report.title,url,publisher:report.publisher,category:report.category,
-      ...(firstSeen ? {dateBasis:'first-seen',seenAt:time} : {publishedAt:time}),
+    const endDay=typeof report.eventEnd==='string' ? report.eventEnd.slice(0,10) : '';
+    const currentStrike=agent && report.category==='labor' && ['announced','ongoing'].includes(report.eventStatus) &&
+      recent(checkedAt,now) && (!endDay || endDay>=today);
+    if ((agent && endDay && endDay<today) ||
+        !recent(time,now,currentStrike ? 7*24*hour : maxAge) || !url || !titleKey || ids.has(report.id) || links.has(url) || titles.has(titleKey)) continue;
+    const eligible = regional || usableTitle(report.title,report.category);
+    if (!eligible && !agent) continue;
+    const category = !regional ? report.category : report.hazardType==='power-outage' ? 'production' :
+      /storm|cyclone|tornado|flood|hurricane|wind|weather/i.test(report.hazardType || '') ? 'weather' : 'natural';
+    const item = {id:report.id,title:report.title,url,publisher:report.publisher,category,
+      ...reportTime,
       entities:Array.isArray(report.entities) ? report.entities.filter(x=>typeof x==='string' && x.trim()) : [],
       country:typeof report.country==='string' ? report.country : '',locality:typeof report.locality==='string' ? report.locality : ''};
+    if (agent) {
+      for (const key of ['summary','confirmation','eventStart','eventEnd','eventStatus','severity','hazardType'])
+        if (typeof report[key]==='string' && report[key]) item[key]=report[key];
+      if (Number.isFinite(report.magnitude)) item.magnitude=report.magnitude;
+      const cited = new Set();
+      item.evidence=[];
+      for (const ref of Array.isArray(report.evidence) ? report.evidence : []) {
+        const href=safeURL(ref?.url,true);
+        if (!href || cited.has(href) || typeof ref.name !== 'string') continue;
+        item.evidence.push({name:ref.name,url:href,date:typeof ref.date==='string'?ref.date:'',
+          dateBasis:['first-seen','event-time','updated','published'].includes(ref.dateBasis)?ref.dateBasis:''});
+        cited.add(href);
+      }
+    }
     ids.add(item.id);links.add(url);titles.add(titleKey);items.push(item);
+    if (!eligible) continue;
     const date = new Date(time).toISOString().slice(0,10);
-    const reportTime = firstSeen ? {dateBasis:'first-seen',seenAt:time} : {publishedAt:time};
+    const source = {name:item.publisher,url,...reportTime};
+    if (dateField === 'publishedAt') source.published=date;
+    else source.role=({seenAt:'First seen ',updatedAt:'Updated ',occurredAt:'Event time '})[dateField]+date;
     const event = {id:'ops-'+item.id, title:item.title, category:item.category, country:item.country, site:item.locality,
-      date, lastChecked:data.generatedAt.slice(0,10), ...reportTime,
-      sources:[{name:item.publisher,url,...reportTime,...(firstSeen ? {role:'First seen '+date+'; publication date unavailable'} : {published:date})}]};
+      ...(agent ? {summary:item.summary,confirmation:item.confirmation} : {}),
+      date, lastChecked:checkedAt.slice(0,10), ...reportTime,
+      sources:[source]};
+    for (const extra of item.evidence || []) if(extra.url!==url) event.sources.push(extra);
     const reason = 'Check current operational impact with the operator before a buyer alert.' +
-      (firstSeen ? ' The report date shows when GDELT discovered the article.' : '') +
+      (firstSeen ? ' The report date shows when the source first recorded the article.' : '') +
       (item.category === 'labor' ? ' Verify a continuous 24-hour stoppage or documented material disruption.' : '');
+    if (regional) {
+      const city = words(item.locality), country = countryName(item.country,countryCode);
+      if (city && country && city !== country) {
+        for (const {supplier} of index.byCity.get(country+'|'+city) || []) matches.push({supplier,event,decision:'unreviewed',
+          kind:'locality',basis:'The reported locality and country match the supplier register. Verify the affected area and operating site.',reason,namedSite:false});
+      }
+      continue;
+    }
     for (const [entry,match] of candidates(item,index,countryCode)) {
       matches.push({...match, supplier:entry.supplier,event,decision:'watch',reason,namedSite:false});
     }
   }
-  items.sort((a,b) => Date.parse(b.publishedAt||b.seenAt)-Date.parse(a.publishedAt||a.seenAt));
+  items.sort((a,b) => Date.parse(reportTimestamp(b))-Date.parse(reportTimestamp(a)));
+  return {matches,items};
+}
+export function matchOperationalLeads(suppliers, data, {now=Date.now(), countryCode}={}) {
+  if (!validFeed(data,now)) throw Error('The operational news feed is unavailable or older than three days.');
+  const sources = sourceStatuses(data,now);
+  if (!sources.some(s=>s.status==='ok')) throw Error('Operational news sources are unavailable.');
+  const {matches,items} = matchOperationalReports(suppliers,data.reports,{checkedAt:data.generatedAt,now,countryCode});
   const healthy = sources.filter(s=>s.status==='ok').length;
   const age = now-Date.parse(data.generatedAt);
   const coverage = healthy+' of '+sources.length+' operational news feeds checked. '+items.length+' recent reports eligible for review.'+

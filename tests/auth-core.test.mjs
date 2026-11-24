@@ -25,6 +25,37 @@ function setup({ role = 'editor', members, handler = () => response(null) } = {}
 }
 function deferred() { let resolve; const promise = new Promise(done => resolve = done); return { promise, resolve }; }
 
+test('the agent uses the current member token, restores without starting, and retries the same job after a lost response',async()=>{
+  const result={reports:[],sourcesChecked:4,sourcesFailed:[],model:'example',checkedAt:new Date(NOW).toISOString()};
+  let attempts=0;
+  const {client,calls}=setup({handler:(url,options)=>{
+    assert.equal(url,config.url+'/functions/v1/atlas-agent-scan');
+    assert.equal(options.headers.Authorization,'Bearer access');
+    assert.equal(options.headers.apikey,config.key);
+    if (options.method === 'GET') {assert.equal(options.body,undefined);return response(null,204);}
+    if (++attempts===1) throw Error('Response lost');
+    return response({status:'succeeded',result});
+  }});
+  assert.equal(await client.loadAgentScan(),null);
+  assert.deepEqual(await client.loadAgentScan({start:true}),result);
+  assert.deepEqual(await client.loadAgentScan({start:true}),result);
+  const ids=calls.filter(call=>call.options.method==='POST').map(call=>JSON.parse(call.options.body));
+  assert.deepEqual(Object.keys(ids[0]),['requestId']);
+  assert.equal(ids[0].requestId,ids[1].requestId);
+  assert.notEqual(ids[1].requestId,ids[2].requestId);
+});
+
+test('a running agent job is polled by its original ID and terminal failure is surfaced',async()=>{
+  let requests=0;
+  const {client,calls}=setup({handler:()=>{
+    if (++requests===1) return response({status:'running'},202);
+    return response({status:'failed',error:'Source service timed out.'});
+  }});
+  await assert.rejects(client.loadAgentScan({start:true}),/Source service timed out/);
+  assert.equal(calls.length,2);
+  assert.equal(calls[0].options.body,calls[1].options.body);
+});
+
 test('default browser fetch keeps its required global receiver', async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;

@@ -24,11 +24,15 @@ export function riskType(event) {
   return 'other';
 }
 
+export function reportTimestamp(report) {
+  return report.publishedAt || report.seenAt || report.updatedAt || report.occurredAt || '';
+}
+const timeLabels = {'first-seen':'First seen ', updated:'Updated ', 'event-time':'Event time '};
 // Feature the newest report in each covered category before additional stories
 // of the same type. The filtered view stays chronological.
 export function orderReports(items, category) {
   const reports = items.filter(item => !category || item.category === category)
-    .sort((a,b) => Date.parse(b.publishedAt || b.seenAt) - Date.parse(a.publishedAt || a.seenAt));
+    .sort((a,b) => Date.parse(reportTimestamp(b)) - Date.parse(reportTimestamp(a)));
   if (category) return reports;
   const seen = new Set(), first = [], rest = [];
   for (const item of reports) {
@@ -74,10 +78,32 @@ export function createReportView(document) {
     for (const report of items.slice(0,limit)) {
       const entry = document.createElement('li'), link = document.createElement('a'), meta = document.createElement('small');
       link.textContent = report.title; link.href = report.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
-      const observed = report.dateBasis === 'first-seen';
       meta.textContent = [riskNames[report.category], report.publisher,
-        (observed ? 'First seen ' : '') + (report.publishedAt || report.seenAt || '').slice(0,10)].filter(Boolean).join(' · ');
-      entry.append(meta,link); list.append(entry);
+        (timeLabels[report.dateBasis] || '') + reportTimestamp(report).slice(0,10)].filter(Boolean).join(' · ');
+      entry.append(meta,link);
+      if (report.summary) {
+        const summary=document.createElement('p');summary.textContent=report.summary;entry.append(summary);
+      }
+      const details=[report.confirmation, report.eventStatus,
+        [report.eventStart,report.eventEnd].filter(Boolean).join(' – '),
+        report.severity, Number.isFinite(report.magnitude)?'Magnitude '+report.magnitude:''].filter(Boolean);
+      if (details.length) {
+        const context=document.createElement('small');context.textContent=details.join(' · ');entry.append(context);
+      }
+      const otherSources=report.evidence?.filter(ref=>ref.url!==report.url) || [];
+      if (otherSources.length) {
+        const evidence=document.createElement('details'), heading=document.createElement('summary');
+        heading.textContent='Additional sources ('+otherSources.length+')';evidence.append(heading);
+        for (const ref of otherSources) {
+          const row=document.createElement('div'), anchor=document.createElement('a');
+          anchor.textContent=ref.name;anchor.href=ref.url;anchor.target='_blank';anchor.rel='noopener noreferrer';
+          row.append(anchor);
+          if(ref.date) {const stamp=document.createElement('small');stamp.textContent=(timeLabels[ref.dateBasis] || '')+ref.date.slice(0,10);row.append(stamp);}
+          evidence.append(row);
+        }
+        entry.append(evidence);
+      }
+      list.append(entry);
     }
     more.hidden = items.length <= limit;
   }
