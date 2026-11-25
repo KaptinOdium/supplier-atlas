@@ -317,7 +317,9 @@ def gdelt(now, previous):
 
 
 def make_feed(now, previous):
-    candidates = [r for r in previous.get('reports', []) if r.get('sourceId') in SOURCES
+    # Manually reviewed public reports share the rolling evidence window with network sources.
+    candidates = [r for r in previous.get('reports', [])
+                  if (r.get('sourceId') in SOURCES or r.get('sourceId') == 'reviewed-public')
                   and (dt := datetime_value(r.get('publishedAt'))) and now - HORIZON <= dt <= now
                   and (r['sourceId'] != 'gdelt' or classify(r.get('title', '')) == r.get('category'))]
     coverage = []
@@ -341,7 +343,8 @@ def make_feed(now, previous):
     # Keep recent evidence from each category even during a burst of recalls.
     unique = {}
     for row in candidates:
-        unique[row['id']] = row
+        if unique.get(row['id'], {}).get('sourceId') != 'reviewed-public':
+            unique[row['id']] = row
     # Prefer regulator notices over verbatim syndication. For wire copies of
     # the same headline, use the earliest published copy within the window.
     distinct = {}

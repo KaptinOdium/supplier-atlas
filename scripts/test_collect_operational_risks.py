@@ -52,6 +52,20 @@ class CollectorTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     feed.make_feed(NOW, {})
 
+    def test_reviewed_public_report_survives_refresh_and_expires_at_original_date(self):
+        original = feed.report('gdelt', 'Example factory fire', 'https://example.org/notice',
+                               NOW - timedelta(hours=1), 'production', NOW)
+        reviewed = {**original, 'sourceId': 'reviewed-public', 'entities': ['Example Manufacturing'],
+                    'country': 'Netherlands', 'locality': 'Example City'}
+        with patch.object(feed, 'SOURCES', {'gdelt': feed.SOURCES['gdelt']}):
+            with patch.object(feed, 'gdelt', return_value=(1, [original], 'Checked.', feed.timestamp(NOW), [])):
+                result = feed.make_feed(NOW, {'reports': [reviewed]})
+            self.assertEqual(result['reports'], [reviewed])
+            self.assertEqual([s['id'] for s in result['coverage']], ['gdelt'])
+            with patch.object(feed, 'gdelt', return_value=(0, [], 'Checked.', feed.timestamp(NOW), [])):
+                expired = feed.make_feed(NOW + feed.HORIZON, result)
+            self.assertEqual(expired['reports'], [])
+
     def test_canada_uses_original_recall_date_and_explicit_subject(self):
         atom = b'''<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>EXAMPLE MFG issued a recall on its vehicles</title>
           <updated>2026-11-23T06:00:00-05:00</updated>

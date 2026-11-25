@@ -17,6 +17,7 @@ const countryAliases = new Map([
   ['us','united states'], ['usa','united states'], ['united states of america','united states'],
   ['uk','united kingdom'], ['gb','united kingdom'], ['great britain','united kingdom'],
   ['republic of korea','south korea'], ['korea republic of','south korea'], ['kr','south korea'],
+  ['netherlands kingdom of the','netherlands'], ['kingdom of the netherlands','netherlands'], ['nl','netherlands'],
   ['czech republic','czechia'], ['turkiye','turkey'], ['deutschland','germany'],
 ]);
 export function countryName(value, countryCode) {

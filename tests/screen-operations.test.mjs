@@ -13,6 +13,17 @@ const row = (id,name,city='Lyon',country='France') => ({id,name,city,country});
 const named = row('1','Asteron Components SAS');
 const run = (reports,rows=[named]) => matchOperationalLeads(rows,snapshot(reports),{now});
 
+test('matches a public plant fire to the site using the formal Netherlands register label', () => {
+  const local = row('nl', 'Asteron Components BV', 'Delft', 'Netherlands (Kingdom of the)');
+  const other = row('be', 'Asteron Components BV', 'Delft', 'Belgium');
+  const report = news('fire', 'Roof fire at Asteron Components plant', 'production', {
+    entities: ['Asteron Components B.V.'], country: 'Netherlands', locality: 'Delft'
+  });
+  const code = name => name.toLowerCase() === 'netherlands' ? 'NL' : null;
+  const result = matchOperationalLeads([local, other], snapshot([report]), {now, countryCode: code});
+  assert.deepEqual(result.matches.map(m => [m.supplier, m.kind, m.decision]), [[local, 'company-city', 'watch']]);
+});
+
 test('reads six categories with evidence and preserves unmatched reports without inventing supplier matches',()=>{
   const reports = [
     news('a','Asteron Components halts production after plant fire','production'),

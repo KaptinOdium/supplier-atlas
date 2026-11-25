@@ -43,6 +43,16 @@ test('matches a city with an administrative suffix without matching other sites 
   assert.deepEqual(run([right, other]).map(m => m.supplier), [right]);
 });
 
+test('matches a reviewed Dutch site across supplier and incident country labels', () => {
+  const dutch = supplier('Example Components B.V.', 'Delft', 'Netherlands (Kingdom of the)');
+  const foreign = supplier('Example Components BV', 'Delft', 'Belgium');
+  const notice = {...site, company: 'Example Components BV', site: 'Delft', country: 'Netherlands',
+    category: 'fire', state: 'monitoring', date: today,
+    screening: {decision: 'watch', reason: 'Check the effect on production.'}};
+  const matches = run([dutch, foreign], [], [notice]);
+  assert.deepEqual(matches.map(m => [m.supplier, m.kind, m.decision]), [[dutch, 'company-city', 'watch']]);
+});
+
 test('handles composite employer and city fields without claiming a pairing or delivery impact', () => {
   const event = {...site, company: 'Different Industries / Example Components Ltd', site: 'Québec City and Montréal, Quebec'};
   const [match] = run([supplier('Example Components')], [event]);
