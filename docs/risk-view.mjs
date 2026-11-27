@@ -56,7 +56,7 @@ export function setRiskOptions(select, counts, document) {
   select.disabled = counts.size === 0;
 }
 
-export function createReportView(document) {
+export function createReportView(document, onShowReport) {
   const filter = document.getElementById('industryFilter');
   const list = document.getElementById('industryList');
   const status = document.getElementById('industryStatus');
@@ -83,6 +83,11 @@ export function createReportView(document) {
       entry.append(meta,link);
       if (report.summary) {
         const summary=document.createElement('p');summary.textContent=report.summary;entry.append(summary);
+      }
+      if (onShowReport && report.mapLocation) {
+        const mapLink=document.createElement('button');
+        mapLink.type='button';mapLink.className='textbutton';mapLink.textContent='Show company on map';
+        mapLink.onclick=()=>onShowReport(report.id);entry.append(mapLink);
       }
       const details=[report.confirmation, report.eventStatus,
         [report.eventStart,report.eventEnd].filter(Boolean).join(' – '),

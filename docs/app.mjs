@@ -1,16 +1,17 @@
 import {norm,parseSuppliers,csvExport,point} from './core.mjs';
 import {AuthClient,configured,AccessError,ConflictError} from './auth-core.mjs?v=20261124-1';
 import {setIdentity} from './auth-state.mjs';
-import {createSupplierMap} from './map-view.mjs?v=20261123-1';
+import {createSupplierMap} from './map-view.mjs?v=20261127-2';
 const $=id=>document.getElementById(id),NS='http://www.w3.org/2000/svg';let lastLookupAt=0;let rows=[],world=[],cities=[],cityIndex=new Map(),countryIndex=new Map(),cache=new Map(),selected=null,busy=false,cancel=false,view=[0,0,1000,500];
 let auth=null,identity=null,revision=0,dirty=false,saving=false,loading=false,loaded=false,epoch=0,checking=false,lookupAbort=null;
 let detailMap=null,detailReady=false,mapAttempt=0,mapAbort=null,detailLoading=false;
 let pendingDuns = '', linkedPopupRow = null;
-import {createScreeningPanel} from './screening-panel.mjs?v=20261127-1';
+let reportLocations = [], pendingReport = '', selectedReport = '';
+import {createScreeningPanel} from './screening-panel.mjs?v=20261127-2';
 import {readPrivateRegister} from './screen-register.mjs';
 import {loadHazardLeads} from './screen-hazards.mjs?v=20261123-1';
 import {loadGdacs} from './screen-gdacs.mjs?v=20261123-1';
-import {loadOperationalLeads} from './screen-operations.mjs?v=20261124-1';
+import {loadOperationalLeads} from './screen-operations.mjs?v=20261127-2';
 import {projectAssessment} from './screen-policy.mjs';
 import {matchSuppliers} from './screen-matches.mjs?v=20261118-3';
 let signalsById = new Map(), screeningState = 'idle', registerPage = 0;
@@ -22,6 +23,7 @@ const levelOrder = {red:2, yellow:1, neutral:0};
 const screeningPanel = createScreeningPanel({
   document, readPrivateRegister, matchSuppliers, countryCode:getCode,
   loadHazardLeads, loadGdacs, loadOperationalLeads, projectAssessment, canReadProject: () => identity?.role === 'owner',
+  onReportLocations: updateReportLocations, onShowReport: focusReport,
   onSignals: updateSignals, onShowMap: focusSupplier, loadAgentScan: options => auth.loadAgentScan(options),
   loadProject: () => identity?.role === 'owner' ? auth.loadScreeningRegister() : null
 });
@@ -29,12 +31,12 @@ const canEdit=()=>identity&&['owner','editor'].includes(identity.role);
 function controls(){updatePreviousExport();screeningPanel.setRows(identity && loaded && !loading ? rows : null);for(const node of document.querySelectorAll('[data-edit]'))node.disabled=!canEdit()||saving||loading||busy||!loaded;$('reloadButton').disabled=!identity||saving||loading||busy;$('exportButton').disabled=!identity||loading;$('saveButton').disabled=!canEdit()||saving||loading||busy||!dirty||!loaded;$('roleNote').textContent=identity?.role==='viewer'?'View-only access':'';$('saveState').textContent=loading?'Loading shared list…':saving?'Saving shared list…':!loaded?'Shared list has not loaded. Reload to try again.':dirty?'Unsaved changes — save to share with your team.':'Shared list is up to date.';$('saveState').classList.toggle('unsaved',dirty);}
 function changed(){dirty=true;controls();}
 function editable(){if(!canEdit()||saving||loading||busy||!loaded){notice('Editing is unavailable while viewing or processing the shared list.',true);return false;}return true;}
-function lock(message='Sign in with your invited account.'){epoch++;pendingDuns='';linkedPopupRow=null;onlyFlagged.checked=true;registerPage=0;screeningPanel.reset();stopDetailedMap();cancel=true;lookupAbort?.abort();lookupAbort=null;identity=null;setIdentity(null);rows=[];cache.clear();selected=null;dirty=false;loading=false;loaded=false;saving=false;busy=false;revision=0;$('cancelButton').hidden=true;$('pasteInput').value='';$('fileInput').value='';$('search').value='';$('lookupConsent').checked=false;$('mapPopup').hidden=true;$('mapPopup').replaceChildren();notice('Sign in to access your supplier list.');if($('editDialog').open)$('editDialog').close();$('editName').textContent='';$('editLocation').textContent='';$('editLat').value='';$('editLon').value='';$('candidateList').replaceChildren();$('workspaceMain').hidden=true;$('authGate').hidden=false;$('accountInfo').hidden=true;$('accountInfo').textContent='';$('logoutButton').hidden=true;$('authNotice').textContent=message;render();controls();}
+function lock(message='Sign in with your invited account.'){epoch++;pendingDuns='';pendingReport='';selectedReport='';reportLocations=[];linkedPopupRow=null;onlyFlagged.checked=true;registerPage=0;screeningPanel.reset();stopDetailedMap();cancel=true;lookupAbort?.abort();lookupAbort=null;identity=null;setIdentity(null);rows=[];cache.clear();selected=null;dirty=false;loading=false;loaded=false;saving=false;busy=false;revision=0;$('cancelButton').hidden=true;$('pasteInput').value='';$('fileInput').value='';$('search').value='';$('lookupConsent').checked=false;$('mapPopup').hidden=true;$('mapPopup').replaceChildren();notice('Sign in to access your supplier list.');if($('editDialog').open)$('editDialog').close();$('editName').textContent='';$('editLocation').textContent='';$('editLat').value='';$('editLon').value='';$('candidateList').replaceChildren();$('workspaceMain').hidden=true;$('authGate').hidden=false;$('accountInfo').hidden=true;$('accountInfo').textContent='';$('logoutButton').hidden=true;$('authNotice').textContent=message;render();controls();}
 async function failAccess(error){if(error instanceof AccessError){lock(error.message);await auth?.signOut();return true;}return false;}
 function safeRows(input){if(!Array.isArray(input)||input.length>10000)throw Error('The shared supplier list is invalid.');const text=v=>typeof v==='string'?v:'';return input.map((r,i)=>{if(!r||typeof r!=='object'||Array.isArray(r))throw Error('The shared supplier list contains an invalid row.');const valid=Number.isFinite(r.lat)&&Number.isFinite(r.lon)&&Math.abs(r.lat)<=90&&Math.abs(r.lon)<=180;return {id:'s'+(i+1),name:text(r.name),duns:text(r.duns),country:text(r.country),city:text(r.city),lat:valid?r.lat:null,lon:valid?r.lon:null,precision:valid?(r.precision==='Approximate city'?'Approximate city':'Provided coordinates'):text(r.precision)||'Unresolved',source:text(r.source),warnings:Array.isArray(r.warnings)?r.warnings.filter(x=>typeof x==='string'):[],candidates:Array.isArray(r.candidates)?r.candidates.filter(c=>c&&Number.isFinite(c.lat)&&Number.isFinite(c.lon)&&Math.abs(c.lat)<=90&&Math.abs(c.lon)<=180).map(c=>({lat:c.lat,lon:c.lon,label:text(c.label),source:text(c.source)})):[]};});}
 async function loadShared(){if(!identity||loading||saving||busy)return;if(dirty&&!confirm('Discard unsaved changes and load the latest shared list?'))return;const requestEpoch=epoch;loading=true;controls();try{const data=await auth.loadShared();if(requestEpoch!==epoch)return;if(!Number.isSafeInteger(data.revision)||data.revision<0)throw Error('The shared list revision is invalid.');rows=safeRows(data.suppliers);revision=data.revision;loaded=true;dirty=false;$('mapPopup').hidden=true;render();fit();notice('Loaded '+rows.length+' suppliers from your private shared workspace.');}catch(e){if(requestEpoch!==epoch)return;if(!await failAccess(e))notice(e.message,true);}finally{if(requestEpoch===epoch){loading=false;controls();}}}
 async function saveShared(){if(!editable()||!dirty)return;const requestEpoch=epoch;saving=true;controls();try{const data=await auth.saveShared(rows,revision);if(requestEpoch!==epoch)return;rows=safeRows(data.suppliers);revision=data.revision;dirty=false;render();notice('Saved '+rows.length+' suppliers. Your team can reload to see the changes.');}catch(e){if(requestEpoch!==epoch)return;if(!await failAccess(e))notice(e instanceof ConflictError?'Someone else saved a newer list. Export your changes if needed, then reload the shared list before saving.':e.message,true);}finally{if(requestEpoch===epoch){saving=false;controls();}}}
-async function openWorkspace(member){pendingDuns=linkedDuns();identity=member;setIdentity(member);const requestEpoch=++epoch;$('loginPassword').value='';$('authGate').hidden=true;$('workspaceMain').hidden=false;$('accountInfo').textContent=member.name+' · '+member.role;$('accountInfo').hidden=false;$('logoutButton').hidden=false;controls();void startDetailedMap(requestEpoch);await prepareMap();if(requestEpoch===epoch)await loadShared();}
+async function openWorkspace(member){pendingDuns=linkedDuns();pendingReport=linkedReport();identity=member;setIdentity(member);const requestEpoch=++epoch;$('loginPassword').value='';$('authGate').hidden=true;$('workspaceMain').hidden=false;$('accountInfo').textContent=member.name+' · '+member.role;$('accountInfo').hidden=false;$('logoutButton').hidden=false;controls();void startDetailedMap(requestEpoch);await prepareMap();if(requestEpoch===epoch)await loadShared();}
 async function recheck(){if(!identity||checking)return;const requestEpoch=epoch;checking=true;try{const member=await auth.verify();if(requestEpoch!==epoch)return;if(member.role!==identity.role)screeningPanel.reset();identity=member;setIdentity(member);controls();}catch(e){if(requestEpoch===epoch&&!await failAccess(e))notice('Account access could not be checked. Reconnect before saving.',true);}finally{checking=false;}}
 window.addEventListener('beforeunload',event=>{if(dirty){event.preventDefault();event.returnValue='';}});
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')recheck();});
@@ -75,6 +77,59 @@ function linkedDuns() {
   const match = /^#duns=(\d{9}|\d{2}-\d{3}-\d{4})$/.exec(window.location.hash);
   return match ? match[1].replaceAll('-', '') : '';
 }
+function linkedReport() {
+  return /^#report=([a-z0-9-]{1,160})$/.exec(window.location.hash)?.[1] || '';
+}
+
+function openLinkedReport() {
+  if (!identity || !loaded || loading || detailLoading || !pendingReport) return;
+  if (reportLocations.some(report => report.id === pendingReport)) focusReport(pendingReport);
+  else if (['partial','complete','unavailable'].includes(screeningState)) {
+    pendingReport = '';
+    $('mapStatus').textContent = 'This company report is unavailable in the current feed.';
+  }
+}
+
+function updateReportLocations(reports) {
+  if (JSON.stringify(reportLocations) !== JSON.stringify(reports)) {
+    reportLocations = reports;
+    if (selectedReport && !reports.some(report => report.id === selectedReport)) closeMapPopup();
+    detailMap?.updateReports?.(reports);
+    renderDots();
+  }
+  openLinkedReport();
+}
+
+function focusReport(id) {
+  const report = reportLocations.find(item => item.id === id);
+  if (!identity || !report) return;
+  if (detailLoading) { pendingReport = id; return; }
+  closeMapPopup();
+  pendingReport = '';
+  pendingDuns = '';
+  selectedReport = id;
+  if (detailReady && detailMap) detailMap.focusReport(report);
+  else {
+    const p = point(report.lat,report.lon);
+    setView([p.x - 4,p.y - 2,8,4]);
+  }
+  const box = $('mapPopup');
+  const close = el('button','×','close');
+  close.setAttribute('aria-label','Close');
+  close.onclick = closeMapPopup;
+  const links = el('div',undefined,'map-link-actions');
+  for (const [label,url] of [['Incident report',report.url],['Company location',report.sourceURL]]) {
+    const link = el('a',label);
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    links.append(link);
+  }
+  box.append(close,el('b',report.name),el('div',report.city),el('p',report.basis),el('p',report.title),links);
+  box.hidden = false;
+  $('mapwrap').scrollIntoView?.({behavior:'smooth',block:'center'});
+}
+
 function openLinkedSupplier() {
   if (!pendingDuns || !identity || !loaded || loading || detailLoading || screeningState === 'idle') return;
   const duns = pendingDuns;
@@ -107,10 +162,12 @@ function openLinkedSupplier() {
 }
 window.addEventListener('hashchange', () => {
   pendingDuns = linkedDuns();
+  pendingReport = linkedReport();
   if (identity) {
     closeMapPopup();
-    if (pendingDuns && identity.role === 'owner' && loaded && !loading) screeningPanel.refreshSaved();
+    if (loaded && !loading && (pendingDuns && identity.role === 'owner' || pendingReport && !reportLocations.some(report => report.id === pendingReport))) screeningPanel.refreshSaved();
     openLinkedSupplier();
+    openLinkedReport();
   }
 });
 function displayRows() {
@@ -126,7 +183,7 @@ function signalEmptyMessage() {
   }
 }
 function filtered(){const q=norm($('search').value),country=$('countryFilter').value,status=$('statusFilter').value;return displayRows().filter(r=>(!q||norm([r.name,r.duns,r.country,r.city].join(' ')).includes(q))&&(!country||r.country===country)&&(!status||(status==='mapped'?hasPoint(r):status==='warnings'?r.warnings.length:!hasPoint(r))));}
-function render(){const mapped=rows.filter(hasPoint);$('countAll').textContent=rows.length.toLocaleString();$('countMapped').textContent=mapped.length.toLocaleString();$('countCountries').textContent=new Set(rows.map(r=>getCode(r.country)||norm(r.country)).filter(Boolean)).size;$('countReview').textContent=rows.length-mapped.length;const old=$('countryFilter').value;$('countryFilter').replaceChildren(new Option('All countries',''));[...new Set(rows.map(r=>r.country).filter(Boolean))].sort().forEach(c=>$('countryFilter').add(new Option(c,c)));$('countryFilter').value=old;$('mapTitle').textContent='Supplier locations';renderTable();renderDots();}
+function render(){const mapped=rows.filter(hasPoint);$('countAll').textContent=rows.length.toLocaleString();$('countMapped').textContent=mapped.length.toLocaleString();$('countCountries').textContent=new Set(rows.map(r=>getCode(r.country)||norm(r.country)).filter(Boolean)).size;$('countReview').textContent=rows.length-mapped.length;const old=$('countryFilter').value;$('countryFilter').replaceChildren(new Option('All countries',''));[...new Set(rows.map(r=>r.country).filter(Boolean))].sort().forEach(c=>$('countryFilter').add(new Option(c,c)));$('countryFilter').value=old;renderTable();renderDots();}
 function renderTable() {
   const list=filtered(), body=$('tableBody'), empty=$('emptyTable');
   body.replaceChildren();
@@ -176,6 +233,7 @@ function renderTable() {
 }
 function svg(tag,attrs){const e=document.createElementNS(NS,tag);for(const [k,v]of Object.entries(attrs))e.setAttribute(k,v);return e;}
 function closeMapPopup() {
+  selectedReport = '';
   linkedPopupRow = null;
   $('mapPopup').hidden=true;
   $('mapPopup').replaceChildren();
@@ -191,12 +249,13 @@ function updateSignals(groups,{state}={state:'idle'}) {
     if (linkedPopupRow && !$('mapPopup').hidden && rows.includes(linkedPopupRow) &&
         (!onlyFlagged.checked || signalsById.has(linkedPopupRow.id))) {
       if (previousLevel !== signalsById.get(linkedPopupRow.id)) popup([linkedPopupRow], true);
-    } else closeMapPopup();
+    } else if (!selectedReport) closeMapPopup();
   }
   renderTable();
   renderDots();
-  if (onlyFlagged.checked && signalsById.size && previousState==='scanning' && state!=='scanning' && !linkedDuns()) fit();
+  if (onlyFlagged.checked && signalsById.size && previousState==='scanning' && state!=='scanning' && !linkedDuns() && !selectedReport && !pendingReport) fit();
   openLinkedSupplier();
+  openLinkedReport();
 }
 function mapDisplayRows() {
   return displayRows().map(row => signalsById.has(row.id) ? {...row, screeningLevel:signalsById.get(row.id)} : row);
@@ -207,14 +266,16 @@ if (typeof ResizeObserver === 'function') {
 function renderDots() {
   const displayRows = mapDisplayRows();
   const mapped=displayRows.filter(hasPoint);
-  $('mapVisibleCount').textContent=mapped.length.toLocaleString()+' of '+rows.length.toLocaleString()+' suppliers on map';
+  $('mapVisibleCount').textContent=mapped.length.toLocaleString()+' of '+rows.length.toLocaleString()+' suppliers on map'+(reportLocations.length ? ' · '+reportLocations.length+' company report'+(reportLocations.length===1?'':'s') : '');
+  $('reportLegend').hidden=!reportLocations.length;
+  $('mapTitle').textContent=reportLocations.length?'Supplier and company locations':'Supplier locations';
   $('neutralLegend').hidden=onlyFlagged.checked;
-  $('emptyMap').hidden=!!mapped.length;
+  $('emptyMap').hidden=!!(mapped.length || reportLocations.length);
   if (!mapped.length) {
     const noSignals=rows.length && onlyFlagged.checked && !displayRows.length;
     $('emptyMapTitle').textContent=noSignals?signalEmptyMessage():'No mapped suppliers';
     $('emptyMapHint').textContent=!rows.length?'Import a list to place your suppliers on the map.':
-      noSignals?'Clear “Yellow or red only” to show all suppliers.':'Review the locations in the supplier register.';
+      noSignals?'Clear “Yellow or red suppliers only” to show all suppliers.':'Review the locations in the supplier register.';
   }
   detailMap?.update(displayRows);
   const dots = $('dots');
@@ -252,10 +313,24 @@ function renderDots() {
     pin.onkeydown = event => { if (['Enter',' '].includes(event.key)) { event.preventDefault(); popup(members); } };
     dots.append(pin);
   }
+  for (const report of reportLocations) {
+    const p = point(report.lat,report.lon);
+    const pin = svg('g', {transform:'translate('+p.x+' '+p.y+')',tabindex:0,role:'button',
+      'aria-label':report.name+', '+report.city+' · Company report'});
+    pin.append(svg('circle',{r:7*scale,fill:'#2869bb',stroke:'#fff','stroke-width':1.7*scale}));
+    pin.append(svg('circle',{r:12*scale,fill:'transparent'}));
+    pin.onclick = event => { event.stopPropagation(); focusReport(report.id); };
+    pin.onkeydown = event => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); focusReport(report.id); }
+    };
+    dots.append(pin);
+  }
 }
 function focusSupplier(row, linked=false){if(!hasPoint(row)||(onlyFlagged.checked&&!signalsById.has(row.id)))return;pendingDuns='';if(detailReady&&detailMap)detailMap.focus(row);else{const p=point(row.lat,row.lon);setView([p.x-22.5,p.y-11.25,45,22.5]);}popup([row], linked);$('mapwrap').scrollIntoView?.({behavior:'smooth',block:'center'});}
 function popup(members, linked=false) {
   pendingDuns = '';
+  pendingReport = '';
+  selectedReport = '';
   linkedPopupRow = linked ? members[0] : null;
   const box = $('mapPopup');
   box.replaceChildren();
@@ -349,12 +424,14 @@ async function startDetailedMap(requestEpoch){
  try{
   const controller=await createSupplierMap({
    container:$('detailMap'),signal:abort.signal,
+   onReportSelect:id=>{if(current())focusReport(id);},
    onSelect:ids=>{if(current()){const selectedIds=new Set(ids);const selected=displayRows().filter(r=>selectedIds.has(r.id));if(selected.length)popup(selected);}},
    onStatus:(message,error=false)=>{if(current()){$('mapStatus').textContent=message;$('mapStatus').classList.toggle('map-error',error);}},
    onReady:()=>{ready=true;if(current()&&detailMap){showDetailedMap(true);detailMap.update(mapDisplayRows());detailMap.fit(mapDisplayRows());}}
   });
   if(!current()){controller.destroy();return;}
   detailMap=controller;
+  detailMap.updateReports?.(reportLocations);
   detailMap.update(mapDisplayRows());
   if(ready){showDetailedMap(true);detailMap.resize();detailMap.fit(mapDisplayRows());}
  }catch(error){
@@ -364,7 +441,7 @@ async function startDetailedMap(requestEpoch){
   $('mapStatus').textContent='Detailed maps are unavailable. The basic world map still works; reload to retry.';
   $('mapStatus').classList.toggle('map-error',true);
  } finally {
-  if(current()){detailLoading=false;openLinkedSupplier();}
+  if(current()){detailLoading=false;openLinkedSupplier();openLinkedReport();}
  }
 }
 

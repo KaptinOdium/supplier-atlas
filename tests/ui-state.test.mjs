@@ -30,12 +30,20 @@ async function fixture({hash='',configuredService=true,role='owner',loadFailure=
   nodes.get('workspaceMain').hidden=true;nodes.get('loginForm').hidden=true;
   const editable=new Set([...html.matchAll(/<[^>]+\bid="([^"]+)"[^>]*data-edit[^>]*>/g)].map(m=>nodes.get(m[1])));
   let saves=0,identity=null;
-  const mapCalls={created:0,destroyed:0,updates:[],fits:[],focused:[],options:null};
+  const mapCalls={created:0,destroyed:0,updates:[],fits:[],focused:[],reportUpdates:[],focusedReports:[],options:null};
   let completeMap;
   const createSupplierMap=async options=>{
     mapCalls.created++;mapCalls.options=options;
     if(!detailedMap)throw Error('Detailed map unavailable in this fixture.');
-    const controller={update:rows=>mapCalls.updates.push(structuredClone(rows)),fit:rows=>mapCalls.fits.push(structuredClone(rows)),focus:row=>mapCalls.focused.push(row.id),destroy:()=>{mapCalls.destroyed++;if(teardownFailure)throw Error('Map teardown failed');},resize(){},world(){},europe(){},zoom(){}};
+    const controller={
+      update:rows=>mapCalls.updates.push(structuredClone(rows)),
+      fit:rows=>mapCalls.fits.push(structuredClone(rows)),
+      focus:row=>mapCalls.focused.push(row.id),
+      updateReports:reports=>mapCalls.reportUpdates.push(structuredClone(reports)),
+      focusReport:report=>mapCalls.focusedReports.push(report.id),
+      destroy:()=>{mapCalls.destroyed++;if(teardownFailure)throw Error('Map teardown failed');},
+      resize(){},world(){},europe(){},zoom(){}
+    };
     if(deferMap)await new Promise(resolve=>completeMap=resolve);
     options.onReady();return controller;
   };
@@ -558,4 +566,86 @@ test('linked neutral supplier opens on the basic map after screening finishes; m
   assert.equal(f.nodes.get('supplierRegister').open,true);
   assert.match(nodeText(f.nodes.get('tableBody')),/Unmapped site/);
   assert.match(f.nodes.get('notice').textContent,/no mapped coordinates/);
+});
+
+const mappedReport = {
+  id:'fws-reviewed-2026-11-27-company', sourceId:'reviewed-public', category:'cyber',
+  title:'Example Hosting reports a cyberattack and disruption to customer services',
+  country:'Germany', locality:'Schwerin', publisher:'Regional news', url:'https://example.org/incident',
+  mapLocation:{
+    name:'Example Hosting GmbH', city:'Schwerin', country:'Germany', lat:53.63, lon:11.41,
+    basis:'Reported company address', sourceURL:'https://example.org/company-address'
+  }
+};
+
+const reportFeed = {
+  items:[{...mappedReport,publishedAt:new Date().toISOString()}], matches:[],
+  checkedAt:new Date().toISOString(), coverage:'Reviewed public reports'
+};
+
+test('a report link focuses its company marker once and keeps the popup when screening finishes',async()=>{
+  let finishHazard;
+  const f=await fixture({
+    hash:'#report='+mappedReport.id, role:'viewer', detailedMap:true, deferMap:true,
+    sharedRows:[supplierRow('s1','Unrelated supplier')], opsLoad:async()=>reportFeed,
+    hazardLoad:()=>new Promise(resolve=>{finishHazard=resolve;})
+  });
+  const popup=f.nodes.get('mapPopup');
+  assert.equal(f.mapCalls.created,0);
+  assert.equal(nodeText(popup).trim(),'');
+  await f.login('valid-password');await settled();
+  assert.deepEqual(f.mapCalls.focusedReports,[]);
+  f.completeMap();await settled();
+  assert.deepEqual(f.mapCalls.focusedReports,[mappedReport.id]);
+  assert.equal(f.mapCalls.reportUpdates.at(-1).length,1);
+  assert.equal(f.mapCalls.reportUpdates.at(-1)[0].id,mappedReport.id);
+  assert.equal(f.nodes.get('onlyFlagged').checked,true);
+  assert.equal(f.nodes.get('tableBody').children.length,0);
+  assert.equal(f.nodes.get('countAll').textContent,'1');
+  assert.match(f.nodes.get('mapVisibleCount').textContent,/0 of 1 supplier/);
+  assert.match(nodeText(popup),/Example Hosting GmbH/);
+  for(const url of [mappedReport.url,mappedReport.mapLocation.sourceURL]) {
+    assert.ok(descendants(popup).some(node=>node.href===url),'missing evidence link '+url);
+  }
+  finishHazard({checkedAt:today,coverage:'Complete',matches:[]});await settled();
+  assert.deepEqual(f.mapCalls.focusedReports,[mappedReport.id]);
+  assert.equal(popup.hidden,false);
+  assert.match(nodeText(popup),/Schwerin/);
+  descendants(popup).find(node=>node.attrs['aria-label']==='Close').onclick();
+  assert.equal(popup.hidden,true);
+  f.mapCalls.options.onReportSelect(mappedReport.id);
+  assert.equal(popup.hidden,false);
+  assert.match(nodeText(popup),/Example Hosting GmbH/);
+  await f.nodes.get('logoutButton').onclick();
+  assert.equal(popup.hidden,true);
+  assert.equal(popup.children.length,0);
+  assert.equal(f.mapCalls.destroyed,1);
+  assert.equal(nodeText(f.nodes.get('industryList')).trim(),'');
+});
+
+test('a public report opens from the industry list and the basic map without a supplier match',async()=>{
+  const f=await fixture({
+    role:'viewer',sharedRows:[supplierRow('s1','Another supplier')],opsLoad:async()=>reportFeed
+  });
+  await f.login('valid-password');await settled();
+  assert.equal(f.context.state().detailReady,false);
+  assert.equal(f.nodes.get('emptyMap').hidden,true);
+  const reportButton=descendants(f.nodes.get('industryList')).find(node=>node.onclick && /map/i.test(node.textContent));
+  assert.ok(reportButton,'a mapped industry report has a map action');
+  reportButton.onclick();
+  const popup=f.nodes.get('mapPopup');
+  assert.equal(popup.hidden,false);
+  assert.match(nodeText(popup),/Example Hosting GmbH/);
+  descendants(popup).find(node=>node.attrs['aria-label']==='Close').onclick();
+  assert.equal(popup.hidden,true);
+  const marker=f.nodes.get('dots').children.find(node=>/Example Hosting GmbH/.test(node.attrs['aria-label']));
+  assert.ok(marker,'basic map exposes a clickable company marker');
+  assert.equal(f.nodes.get('reportLegend').hidden,false);
+  marker.onclick({stopPropagation(){}});
+  assert.match(nodeText(popup),/Schwerin/);
+  assert.equal(f.nodes.get('tableBody').children.length,0);
+  await f.nodes.get('logoutButton').onclick();
+  assert.equal(popup.children.length,0);
+  assert.equal(f.nodes.get('dots').children.length,0);
+  assert.equal(f.nodes.get('reportLegend').hidden,true);
 });

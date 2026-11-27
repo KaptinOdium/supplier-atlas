@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {loadOperationalLeads,matchOperationalLeads,operationalSourceURL} from '../docs/screen-operations.mjs';
+import {loadOperationalLeads,matchOperationalLeads,matchOperationalReports,operationalSourceURL} from '../docs/screen-operations.mjs';
 
 const now = Date.parse('2026-11-23T12:00:00Z');
 const generatedAt = new Date(now).toISOString();
@@ -12,6 +12,22 @@ const news = (id,title,category,extra={}) => ({id,title,category,publishedAt,url
 const row = (id,name,city='Lyon',country='France') => ({id,name,city,country});
 const named = row('1','Asteron Components SAS');
 const run = (reports,rows=[named]) => matchOperationalLeads(rows,snapshot(reports),{now});
+
+test('reviewed map locations identify companies independently of supplier matches', () => {
+  const location = {name:'Example Software', city:'Lyon', lat:45.75, lon:4.85,
+    basis:'Headquarters city.', sourceURL:'https://example.org/contact'};
+  const report = news('software', 'Example Software confirms a cyberattack that disrupted services', 'cyber',
+    {country:'France', sourceId:'reviewed-public', mapLocation:location});
+  const {items, matches} = run([report]);
+  assert.deepEqual(items[0].mapLocation, location);
+  assert.deepEqual(matches, []);
+  assert.equal(run([{...report, sourceId:'gdelt'}]).items[0].mapLocation, undefined);
+  assert.equal(matchOperationalReports([named], [report], {now, checkedAt:generatedAt, agent:true}).items[0].mapLocation, undefined);
+  for (const invalid of [{lat:'45'}, {lon:181}, {lat:-91}, {name:' '}, {city:''}, {basis:null},
+    {sourceURL:'http://example.org/contact'}, {sourceURL:'https://user@example.org/contact'}]) {
+    assert.equal(run([{...report, mapLocation:{...location, ...invalid}}]).items[0].mapLocation, undefined);
+  }
+});
 
 test('matches a public plant fire to the site using the formal Netherlands register label', () => {
   const local = row('nl', 'Asteron Components BV', 'Delft', 'Netherlands (Kingdom of the)');

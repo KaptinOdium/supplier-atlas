@@ -32,3 +32,4 @@
 .legend .dot.signal-red{background:var(--atlas-dot-red)}
 .legend .dot.signal-yellow{background:var(--atlas-dot-yellow)}
 .legend .dot.signal-neutral{background:var(--atlas-dot-neutral)}
+.legend .dot.report-location{background:#2869bb}

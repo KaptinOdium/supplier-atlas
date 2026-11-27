@@ -6,6 +6,7 @@ const CSS_URL = `https://cdn.jsdelivr.net/npm/maplibre-gl@${VERSION}/dist/maplib
 const CSS_INTEGRITY = 'sha384-S+OnE5M4U3Qc2nR0RgljGrVs06xqfRg8L7uFk/pOF5+sRuSDG4oKkqKZmFrx7w09';
 const STYLES = { light: 'https://tiles.openfreemap.org/styles/liberty', dark: 'https://tiles.openfreemap.org/styles/dark' };
 const SOURCE = 'atlas-suppliers';
+const REPORT_SOURCE = 'atlas-company-reports', REPORT_POINTS = 'atlas-report-points';
 const CLUSTERS = 'atlas-clusters', COUNTS = 'atlas-cluster-counts', POINTS = 'atlas-points', SELECTED = 'atlas-selected';
 let rendererPromise;
 
@@ -44,12 +45,25 @@ async function loadRenderer(signal) {
   return abortable(rendererPromise, signal);
 }
 
-export async function createSupplierMap({ container, onSelect = () => {}, onStatus = () => {}, onReady = () => {}, signal } = {}) {
+export function companyReportFeatures(reports) {
+  return {
+    type: 'FeatureCollection',
+    features: mapRows(reports).map(({id, lat, lon}) => ({
+      type: 'Feature',
+      geometry: {type: 'Point', coordinates: [lon, Math.max(-85.051129, Math.min(85.051129, lat))]},
+      properties: {reportId: id}
+    }))
+  };
+}
+
+export async function createSupplierMap({ container, onSelect = () => {}, onReportSelect = () => {}, onStatus = () => {}, onReady = () => {}, signal } = {}) {
   if (!container) throw new Error('The detailed map container is missing.');
   const api = await loadRenderer(signal);
   checkAbort(signal);
   const host = document.createElement('div'); host.className = 'atlas-map-canvas'; container.append(host);
   let map, destroyed = false, ready = false, styleReady = false, selectedId = '', currentRows = [], styleGeneration = 0;
+  let reportData = companyReportFeatures([]);
+  let selectionGeneration = 0;
   let theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
   const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
   const motion = reducedMotion ? 0 : 650;
@@ -66,7 +80,7 @@ export async function createSupplierMap({ container, onSelect = () => {}, onStat
     window.removeEventListener('keydown', exitExpanded);
     container.closest('.mapwrap')?.classList.remove('maplibregl-pseudo-fullscreen');
     signal?.removeEventListener('abort', abort);
-    currentRows = []; selectedId = '';
+    currentRows = []; selectedId = ''; reportData = companyReportFeatures([]);
     try { if (map) map.remove(); }
     finally { host.remove(); if (!ready) rejectInitial(abortError()); }
   }
@@ -103,9 +117,21 @@ export async function createSupplierMap({ container, onSelect = () => {}, onStat
     } else map.getSource(SOURCE).setData(supplierFeatures(currentRows));
     map.setFilter(SELECTED, ['==', ['get', 'supplierId'], selectedId]);
   }
+  function installReports() {
+    if (!live() || !styleReady) return;
+    const existing = map.getSource(REPORT_SOURCE);
+    if (existing) {
+      existing.setData(reportData);
+      return;
+    }
+    map.addSource(REPORT_SOURCE, {type: 'geojson', data: reportData});
+    map.addLayer({id: REPORT_POINTS, type: 'circle', source: REPORT_SOURCE, paint: {
+      'circle-color': '#2869bb', 'circle-radius': 8, 'circle-stroke-width': 2, 'circle-stroke-color': '#ffffff'
+    }});
+  }
   async function selectCluster(feature) {
-    const source = map.getSource(SOURCE), generation = styleGeneration, rows = currentRows;
-    const current = () => live() && generation === styleGeneration && rows === currentRows;
+    const source = map.getSource(SOURCE), generation = styleGeneration, selection = selectionGeneration, rows = currentRows;
+    const current = () => live() && generation === styleGeneration && selection === selectionGeneration && rows === currentRows;
     if (!source) return;
     try {
       const clusterId = Number(feature.properties.cluster_id);
@@ -131,7 +157,7 @@ export async function createSupplierMap({ container, onSelect = () => {}, onStat
     map.touchZoomRotate.disableRotation();
     map.addControl(new api.ScaleControl({ maxWidth: 110, unit: 'metric' }), 'bottom-left');
     map.addControl(new api.FullscreenControl({ container: container.closest('.mapwrap') || container, pseudo: true }), 'top-right');
-    map.getCanvas().setAttribute('aria-label', 'Supplier screening map. Red and yellow indicate screening results. Each cluster shows its highest level. Use the results list for supplier details, arrow keys to pan, and plus or minus to zoom.');
+    map.getCanvas().setAttribute('aria-label', 'Supplier screening map. Red and yellow indicate screening results. Each supplier cluster shows its highest level. Blue dots show public company reports. Use the results list for supplier details, arrow keys to pan, and plus or minus to zoom.');
     signal?.addEventListener('abort', abort, { once: true });
     checkAbort(signal);
     timer = setTimeout(() => { if (!ready) rejectInitial(new Error('The detailed map could not load. The overview map is still available.')); }, 18000);
@@ -141,6 +167,7 @@ export async function createSupplierMap({ container, onSelect = () => {}, onStat
 
       styleReady = true;
       installData();
+      installReports();
       if (!ready) { ready = true; clearTimeout(timer); resolveInitial(); onReady(); }
       report('Street map · OpenFreeMap / OpenStreetMap');
     });
@@ -150,9 +177,17 @@ export async function createSupplierMap({ container, onSelect = () => {}, onStat
       else report('Some map detail is unavailable. Supplier markers and the register remain available.', true);
     });
     map.on('click', async event => {
-      if (!live() || !map.getLayer(POINTS)) return;
-      const features = map.queryRenderedFeatures(event.point, { layers: [CLUSTERS, POINTS] });
+      if (!live() || !styleReady || !map.getLayer(POINTS)) return;
+      const features = map.queryRenderedFeatures(event.point, { layers: [CLUSTERS, POINTS, REPORT_POINTS] });
       if (!features.length) return;
+      selectionGeneration++;
+      const publicReport = features.find(feature => feature.layer.id === REPORT_POINTS);
+      if (publicReport) {
+        selectedId = '';
+        map.setFilter(SELECTED, ['==', ['get', 'supplierId'], selectedId]);
+        onReportSelect(publicReport.properties.reportId);
+        return;
+      }
       const cluster = features.find(feature => feature.properties.cluster_id !== undefined);
       if (cluster) return selectCluster(cluster);
       const first = features[0], coordinates = first.geometry.coordinates;
@@ -163,8 +198,8 @@ export async function createSupplierMap({ container, onSelect = () => {}, onStat
       onSelect(ids.length ? ids : [selectedId]);
     });
     map.on('mousemove', event => {
-      if (!live() || !map.getLayer(POINTS)) return;
-      map.getCanvas().style.cursor = map.queryRenderedFeatures(event.point, { layers: [CLUSTERS, POINTS] }).length ? 'pointer' : '';
+      if (!live() || !styleReady || !map.getLayer(POINTS)) return;
+      map.getCanvas().style.cursor = map.queryRenderedFeatures(event.point, { layers: [CLUSTERS, POINTS, REPORT_POINTS] }).length ? 'pointer' : '';
     });
     window.addEventListener('supplier-theme-change', changeTheme);
     window.addEventListener('keydown', exitExpanded);
@@ -172,6 +207,20 @@ export async function createSupplierMap({ container, onSelect = () => {}, onStat
     checkAbort(signal);
     return {
       update(rows) { if (!live()) return; currentRows = mapRows(rows).map(row => ({ id: row.id, lat: row.lat, lon: row.lon, screeningLevel: row.screeningLevel })); if (!currentRows.some(row => row.id === selectedId)) selectedId = ''; installData(); },
+      updateReports(reports) {
+        if (!live()) return;
+        reportData = companyReportFeatures(reports);
+        installReports();
+      },
+      focusReport(item) {
+        if (!live()) return;
+        const feature = reportData.features.find(entry => entry.properties.reportId === item?.id);
+        if (!feature) return;
+        selectionGeneration++;
+        selectedId = '';
+        if (map.getLayer(SELECTED)) map.setFilter(SELECTED, ['==', ['get', 'supplierId'], selectedId]);
+        map.easeTo({center: feature.geometry.coordinates, zoom: 9, duration: motion});
+      },
       fit(rows = currentRows) { if (!live()) return; const bounds = supplierBounds(rows); if (!bounds) return this.world(); map.fitBounds(bounds, { padding: { top: 65, bottom: 85, left: 55, right: 55 }, maxZoom: 11, duration: motion }); },
       world() { if (live()) map.easeTo({ center: [12, 28], zoom: 1.5, bearing: 0, pitch: 0, duration: motion }); },
       europe() { if (live()) map.fitBounds([[-15, 34], [38, 67]], { padding: 35, duration: motion }); },

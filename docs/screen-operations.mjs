@@ -151,6 +151,15 @@ function candidates(item, index, countryCode) {
 function validFeed(data, now) {
   return data?.version === 1 && recent(data.generatedAt,now) && Array.isArray(data.coverage) && Array.isArray(data.reports);
 }
+function reviewedMapLocation(location) {
+  if (!location || !Number.isFinite(location.lat) || Math.abs(location.lat) > 90 ||
+      !Number.isFinite(location.lon) || Math.abs(location.lon) > 180 ||
+      ![location.name, location.city, location.basis].every(value => typeof value === 'string' && value.trim())) return null;
+  const sourceURL = safeURL(location.sourceURL);
+  if (!sourceURL) return null;
+  return {name:location.name.trim(), city:location.city.trim(), lat:location.lat, lon:location.lon,
+    basis:location.basis.trim(), sourceURL};
+}
 function sourceStatuses(data,now) {
   return data.coverage.filter(s => s && typeof s.id === 'string' && typeof s.name === 'string' &&
     ['ok','unavailable'].includes(s.status) && Number.isFinite(Date.parse(s.checkedAt)) && safeURL(s.url))
@@ -185,6 +194,10 @@ export function matchOperationalReports(suppliers, reports, {checkedAt, now=Date
       ...reportTime,
       entities:Array.isArray(report.entities) ? report.entities.filter(x=>typeof x==='string' && x.trim()) : [],
       country:typeof report.country==='string' ? report.country : '',locality:typeof report.locality==='string' ? report.locality : ''};
+    if (!agent && report.sourceId === 'reviewed-public') {
+      const location = reviewedMapLocation(report.mapLocation);
+      if (location) item.mapLocation = location;
+    }
     if (agent) {
       for (const key of ['summary','confirmation','eventStart','eventEnd','eventStatus','severity','hazardType'])
         if (typeof report[key]==='string' && report[key]) item[key]=report[key];
