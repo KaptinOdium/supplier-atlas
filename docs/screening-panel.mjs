@@ -343,5 +343,5 @@ export function createScreeningPanel({document, loadProject, readPrivateRegister
   findingsFilter.onchange=()=>{visibleLimit=40;renderResults(dayFormat.format(new Date()));};
   removeFile.onclick=()=>{clearFile();controls();render();};
   controls();
-  return {setRows, reset, showSupplier};
+  return {setRows, reset, showSupplier, refreshSaved:()=>scan(false)};
 }

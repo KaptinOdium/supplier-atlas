@@ -23,7 +23,7 @@ class Element {
   showModal(){this.open=true;}
   close(){this.open=false;}
 }
-async function fixture({configuredService=true,role='owner',loadFailure=false,cityPartCount=1,failedCityPart=null,detailedMap=false,deferMap=false,teardownFailure=false,assess=()=>"",hazardLoad=async()=>{throw Error("Unavailable");},gdacsLoad=async()=>{throw Error("Unavailable");},opsLoad=async()=>{throw Error("Unavailable");},sharedRows=[],projectLoad=async()=>null,
+async function fixture({hash='',configuredService=true,role='owner',loadFailure=false,cityPartCount=1,failedCityPart=null,detailedMap=false,deferMap=false,teardownFailure=false,assess=()=>"",hazardLoad=async()=>{throw Error("Unavailable");},gdacsLoad=async()=>{throw Error("Unavailable");},opsLoad=async()=>{throw Error("Unavailable");},sharedRows=[],projectLoad=async()=>null,
   agentLoad=async({start})=>start ? {checkedAt:new Date().toISOString(),sourcesChecked:2,sourcesFailed:[],model:'test',reports:[]} : null}={}){
   const nodes=new Map([...html.matchAll(/id="([^"]+)"/g)].map(m=>[m[1],new Element(m[1])]));
   nodes.get('onlyFlagged').checked=/<input id="onlyFlagged"[^>]*\bchecked\b/.test(html);
@@ -65,11 +65,13 @@ async function fixture({configuredService=true,role='owner',loadFailure=false,ci
     if(path==='./world-map.json')return {ok:true,json:async()=>[]};
     throw Error('Unexpected fetch '+path);
   };
-  const context=vm.createContext({createScreeningPanel,projectAssessment:assess,loadHazardLeads:hazardLoad,loadGdacs:gdacsLoad,loadOperationalLeads:opsLoad,matchSuppliers,readPrivateRegister:JSON.parse,console,Map,Set,Intl,Number,String,Object,Array,Math,Date,URL,Blob,AbortController,AbortSignal,Promise,Error,Option:class extends Element{constructor(text,value){super();this.textContent=text;this.value=value;}},norm,parseSuppliers,csvExport,point,AccessError,ConflictError,configured,AuthClient:Auth,createSupplierMap,setIdentity:v=>identity=v,confirm:()=>true,setInterval:()=>0,setTimeout,clearTimeout,sessionStorage:{getItem:()=>null,setItem(){},removeItem(){}},window:{addEventListener(){}},document:{visibilityState:'visible',getElementById:id=>{if(!nodes.has(id))throw Error('Missing DOM id '+id);return nodes.get(id);},querySelectorAll:()=>[...editable,...[...nodes.values()].flatMap(n=>n.children).filter(n=>n?.attrs?.['data-edit']!==undefined)],createElement:()=>new Element(),createElementNS:()=>new Element(),addEventListener(){}},fetch:fetcher});
+  const windowListeners = {};
+  const window = {location:{hash},addEventListener:(event,listener)=>{windowListeners[event]=listener;}};
+  const context=vm.createContext({createScreeningPanel,projectAssessment:assess,loadHazardLeads:hazardLoad,loadGdacs:gdacsLoad,loadOperationalLeads:opsLoad,matchSuppliers,readPrivateRegister:JSON.parse,console,Map,Set,Intl,Number,String,Object,Array,Math,Date,URL,Blob,AbortController,AbortSignal,Promise,Error,Option:class extends Element{constructor(text,value){super();this.textContent=text;this.value=value;}},norm,parseSuppliers,csvExport,point,AccessError,ConflictError,configured,AuthClient:Auth,createSupplierMap,setIdentity:v=>identity=v,confirm:()=>true,setInterval:()=>0,setTimeout,clearTimeout,sessionStorage:{getItem:()=>null,setItem(){},removeItem(){}},window,document:{visibilityState:'visible',getElementById:id=>{if(!nodes.has(id))throw Error('Missing DOM id '+id);return nodes.get(id);},querySelectorAll:()=>[...editable,...[...nodes.values()].flatMap(n=>n.children).filter(n=>n?.attrs?.['data-edit']!==undefined)],createElement:()=>new Element(),createElementNS:()=>new Element(),addEventListener(){}},fetch:fetcher});
   vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace(/start\(\);\s*$/,'globalThis.ready=start();')+'\nglobalThis.state=()=>({rows,dirty,identity,loaded,view,detailReady});',context);
   await context.ready;
   const login=async password=>{nodes.get('loginEmail').value='member@example.com';nodes.get('loginPassword').value=password;await nodes.get('loginForm').onsubmit({preventDefault(){}});};
-  return {nodes,context,login,mapCalls,requestedPaths,setRole:value=>{role=value;},completeMap:()=>completeMap?.(),saves:()=>saves,identity:()=>identity,cityRequests:()=>totalCityRequests,maxCityRequests:()=>maxCityRequests};
+  return {nodes,context,login,mapCalls,requestedPaths,setHash(value){window.location.hash=value;windowListeners.hashchange();},setRole:value=>{role=value;},completeMap:()=>completeMap?.(),saves:()=>saves,identity:()=>identity,cityRequests:()=>totalCityRequests,maxCityRequests:()=>maxCityRequests};
 }
 test('unconfigured deployment stays locked and does not offer a pretend login',async()=>{const f=await fixture({configuredService:false});assert.equal(f.nodes.get('workspaceMain').hidden,true);assert.equal(f.nodes.get('loginForm').hidden,true);assert.match(f.nodes.get('authNotice').textContent,/setup is not finished/i);assert.equal(f.context.state().rows.length,0);});
 test('failed login stays locked and clears password',async()=>{const f=await fixture();await f.login('wrong');assert.equal(f.nodes.get('workspaceMain').hidden,true);assert.equal(f.nodes.get('loginPassword').value,'');assert.equal(f.identity(),null);});
@@ -488,4 +490,72 @@ test('a member with an empty register can start the agent while passive loading 
   assert.match(f.nodes.get('scanStatus').textContent,/No suppliers loaded/);
   assert.match(f.nodes.get('agentStatus').textContent,/Agent scan completed/);
   assert.match(nodeText(f.nodes.get('industryList')),/Factory fire reported/);
+});
+
+
+test('DUNS link waits for authentication, screening and the detailed map, then opens once', async()=>{
+  let release, finishHazard;
+  const agentStarts=[];
+  const rows=[supplierRow('s1','Named plant'),supplierRow('s2','Unflagged site')];
+  const f=await fixture({hash:'#duns=01-023-4561',sharedRows:rows,detailedMap:true,deferMap:true,
+    agentLoad:async({start})=>{agentStarts.push(start);return null;},
+    hazardLoad:list=>new Promise(resolve=>{finishHazard=()=>resolve({matches:[{supplier:list[0],
+      event:registerFor('Named plant','Production stopped',true).events[0],decision:'candidate',namedSite:true}],
+      coverage:'Source checked',checkedAt:today});}),
+    projectLoad:()=>new Promise(resolve=>{release=resolve;})});
+  assert.equal(f.mapCalls.created,0);
+  assert.equal(f.context.state().rows.length,0);
+  await f.login('valid-password');
+  assert.deepEqual(f.mapCalls.focused,[]);
+  release(registerFor('Named plant'));await settled();
+  assert.deepEqual(f.mapCalls.focused,[]);
+  f.completeMap();await settled();
+  assert.deepEqual(f.mapCalls.focused,['s1']);
+  assert.equal(f.nodes.get('onlyFlagged').checked,true);
+  assert.match(nodeText(f.nodes.get('mapPopup')),/Named plant.*Needs review/);
+  assert.match(f.nodes.get('scanStatus').textContent,/Checking/);
+  finishHazard();await settled();
+  assert.equal(f.nodes.get('mapPopup').hidden,false);
+  assert.match(nodeText(f.nodes.get('mapPopup')),/Named plant.*Active site incident/);
+  const scan=f.nodes.get('refreshScreening').onclick();
+  release(registerFor('Named plant'));finishHazard();await scan;
+  assert.deepEqual(f.mapCalls.focused,['s1']);
+  f.setHash('#duns=010234562');
+  assert.deepEqual(f.mapCalls.focused,['s1']);
+  release(registerFor('Unrelated'));finishHazard();await settled();
+  assert.deepEqual(agentStarts,[false,true,false]);
+  assert.deepEqual(f.mapCalls.focused,['s1','s2']);
+  assert.equal(f.nodes.get('onlyFlagged').checked,false);
+  assert.match(nodeText(f.nodes.get('mapPopup')),/Unflagged site/);
+  f.nodes.get('search').value='01-023-4562';
+  f.nodes.get('search').listeners.input();
+  assert.match(nodeText(f.nodes.get('tableBody')),/Unflagged site/);
+  assert.doesNotMatch(nodeText(f.nodes.get('tableBody')),/Named plant/);
+  await f.nodes.get('logoutButton').onclick();
+  assert.equal(f.nodes.get('mapPopup').hidden,true);
+  assert.equal(f.nodes.get('mapPopup').children.length,0);
+  f.setHash('#duns=010234561');
+  assert.deepEqual(f.mapCalls.focused,['s1','s2']);
+});
+
+test('linked neutral supplier opens on the basic map after screening finishes; malformed, unknown and unmapped IDs stay distinct', async()=>{
+  let release;
+  const rows=[supplierRow('s1','Neutral site'),{...supplierRow('s2','Unmapped site'),lat:null,lon:null}];
+  const f=await fixture({hash:'#duns=010234561',sharedRows:rows,projectLoad:()=>new Promise(resolve=>{release=resolve;})});
+  await f.login('valid-password');
+  assert.equal(f.nodes.get('onlyFlagged').checked,true);
+  release(registerFor('Unrelated'));await settled();
+  assert.equal(f.nodes.get('onlyFlagged').checked,false);
+  assert.equal(f.nodes.get('mapPopup').hidden,false);
+  assert.match(nodeText(f.nodes.get('mapPopup')),/Neutral site/);
+  assert.equal(f.context.state().view[2],45);
+  f.setHash('#duns=01023-45-62');
+  assert.equal(f.nodes.get('mapPopup').hidden,true);
+  assert.equal(f.nodes.get('search').value,'');
+  f.setHash('#duns=000000000');release(registerFor('Unrelated'));await settled();
+  assert.match(f.nodes.get('notice').textContent,/absent/);
+  f.setHash('#duns=010234562');release(registerFor('Unrelated'));await settled();
+  assert.equal(f.nodes.get('supplierRegister').open,true);
+  assert.match(nodeText(f.nodes.get('tableBody')),/Unmapped site/);
+  assert.match(f.nodes.get('notice').textContent,/no mapped coordinates/);
 });

@@ -4,8 +4,9 @@ import {setIdentity} from './auth-state.mjs';
 import {createSupplierMap} from './map-view.mjs?v=20261123-1';
 const $=id=>document.getElementById(id),NS='http://www.w3.org/2000/svg';let lastLookupAt=0;let rows=[],world=[],cities=[],cityIndex=new Map(),countryIndex=new Map(),cache=new Map(),selected=null,busy=false,cancel=false,view=[0,0,1000,500];
 let auth=null,identity=null,revision=0,dirty=false,saving=false,loading=false,loaded=false,epoch=0,checking=false,lookupAbort=null;
-let detailMap=null,detailReady=false,mapAttempt=0,mapAbort=null;
-import {createScreeningPanel} from './screening-panel.mjs?v=20261124-1';
+let detailMap=null,detailReady=false,mapAttempt=0,mapAbort=null,detailLoading=false;
+let pendingDuns = '', linkedPopupRow = null;
+import {createScreeningPanel} from './screening-panel.mjs?v=20261127-1';
 import {readPrivateRegister} from './screen-register.mjs';
 import {loadHazardLeads} from './screen-hazards.mjs?v=20261123-1';
 import {loadGdacs} from './screen-gdacs.mjs?v=20261123-1';
@@ -28,12 +29,12 @@ const canEdit=()=>identity&&['owner','editor'].includes(identity.role);
 function controls(){updatePreviousExport();screeningPanel.setRows(identity && loaded && !loading ? rows : null);for(const node of document.querySelectorAll('[data-edit]'))node.disabled=!canEdit()||saving||loading||busy||!loaded;$('reloadButton').disabled=!identity||saving||loading||busy;$('exportButton').disabled=!identity||loading;$('saveButton').disabled=!canEdit()||saving||loading||busy||!dirty||!loaded;$('roleNote').textContent=identity?.role==='viewer'?'View-only access':'';$('saveState').textContent=loading?'Loading shared list…':saving?'Saving shared list…':!loaded?'Shared list has not loaded. Reload to try again.':dirty?'Unsaved changes — save to share with your team.':'Shared list is up to date.';$('saveState').classList.toggle('unsaved',dirty);}
 function changed(){dirty=true;controls();}
 function editable(){if(!canEdit()||saving||loading||busy||!loaded){notice('Editing is unavailable while viewing or processing the shared list.',true);return false;}return true;}
-function lock(message='Sign in with your invited account.'){epoch++;onlyFlagged.checked=true;registerPage=0;screeningPanel.reset();stopDetailedMap();cancel=true;lookupAbort?.abort();lookupAbort=null;identity=null;setIdentity(null);rows=[];cache.clear();selected=null;dirty=false;loading=false;loaded=false;saving=false;busy=false;revision=0;$('cancelButton').hidden=true;$('pasteInput').value='';$('fileInput').value='';$('search').value='';$('lookupConsent').checked=false;$('mapPopup').hidden=true;$('mapPopup').replaceChildren();notice('Sign in to access your supplier list.');if($('editDialog').open)$('editDialog').close();$('editName').textContent='';$('editLocation').textContent='';$('editLat').value='';$('editLon').value='';$('candidateList').replaceChildren();$('workspaceMain').hidden=true;$('authGate').hidden=false;$('accountInfo').hidden=true;$('accountInfo').textContent='';$('logoutButton').hidden=true;$('authNotice').textContent=message;render();controls();}
+function lock(message='Sign in with your invited account.'){epoch++;pendingDuns='';linkedPopupRow=null;onlyFlagged.checked=true;registerPage=0;screeningPanel.reset();stopDetailedMap();cancel=true;lookupAbort?.abort();lookupAbort=null;identity=null;setIdentity(null);rows=[];cache.clear();selected=null;dirty=false;loading=false;loaded=false;saving=false;busy=false;revision=0;$('cancelButton').hidden=true;$('pasteInput').value='';$('fileInput').value='';$('search').value='';$('lookupConsent').checked=false;$('mapPopup').hidden=true;$('mapPopup').replaceChildren();notice('Sign in to access your supplier list.');if($('editDialog').open)$('editDialog').close();$('editName').textContent='';$('editLocation').textContent='';$('editLat').value='';$('editLon').value='';$('candidateList').replaceChildren();$('workspaceMain').hidden=true;$('authGate').hidden=false;$('accountInfo').hidden=true;$('accountInfo').textContent='';$('logoutButton').hidden=true;$('authNotice').textContent=message;render();controls();}
 async function failAccess(error){if(error instanceof AccessError){lock(error.message);await auth?.signOut();return true;}return false;}
 function safeRows(input){if(!Array.isArray(input)||input.length>10000)throw Error('The shared supplier list is invalid.');const text=v=>typeof v==='string'?v:'';return input.map((r,i)=>{if(!r||typeof r!=='object'||Array.isArray(r))throw Error('The shared supplier list contains an invalid row.');const valid=Number.isFinite(r.lat)&&Number.isFinite(r.lon)&&Math.abs(r.lat)<=90&&Math.abs(r.lon)<=180;return {id:'s'+(i+1),name:text(r.name),duns:text(r.duns),country:text(r.country),city:text(r.city),lat:valid?r.lat:null,lon:valid?r.lon:null,precision:valid?(r.precision==='Approximate city'?'Approximate city':'Provided coordinates'):text(r.precision)||'Unresolved',source:text(r.source),warnings:Array.isArray(r.warnings)?r.warnings.filter(x=>typeof x==='string'):[],candidates:Array.isArray(r.candidates)?r.candidates.filter(c=>c&&Number.isFinite(c.lat)&&Number.isFinite(c.lon)&&Math.abs(c.lat)<=90&&Math.abs(c.lon)<=180).map(c=>({lat:c.lat,lon:c.lon,label:text(c.label),source:text(c.source)})):[]};});}
 async function loadShared(){if(!identity||loading||saving||busy)return;if(dirty&&!confirm('Discard unsaved changes and load the latest shared list?'))return;const requestEpoch=epoch;loading=true;controls();try{const data=await auth.loadShared();if(requestEpoch!==epoch)return;if(!Number.isSafeInteger(data.revision)||data.revision<0)throw Error('The shared list revision is invalid.');rows=safeRows(data.suppliers);revision=data.revision;loaded=true;dirty=false;$('mapPopup').hidden=true;render();fit();notice('Loaded '+rows.length+' suppliers from your private shared workspace.');}catch(e){if(requestEpoch!==epoch)return;if(!await failAccess(e))notice(e.message,true);}finally{if(requestEpoch===epoch){loading=false;controls();}}}
 async function saveShared(){if(!editable()||!dirty)return;const requestEpoch=epoch;saving=true;controls();try{const data=await auth.saveShared(rows,revision);if(requestEpoch!==epoch)return;rows=safeRows(data.suppliers);revision=data.revision;dirty=false;render();notice('Saved '+rows.length+' suppliers. Your team can reload to see the changes.');}catch(e){if(requestEpoch!==epoch)return;if(!await failAccess(e))notice(e instanceof ConflictError?'Someone else saved a newer list. Export your changes if needed, then reload the shared list before saving.':e.message,true);}finally{if(requestEpoch===epoch){saving=false;controls();}}}
-async function openWorkspace(member){identity=member;setIdentity(member);const requestEpoch=++epoch;$('loginPassword').value='';$('authGate').hidden=true;$('workspaceMain').hidden=false;$('accountInfo').textContent=member.name+' · '+member.role;$('accountInfo').hidden=false;$('logoutButton').hidden=false;controls();void startDetailedMap(requestEpoch);await prepareMap();if(requestEpoch===epoch)await loadShared();}
+async function openWorkspace(member){pendingDuns=linkedDuns();identity=member;setIdentity(member);const requestEpoch=++epoch;$('loginPassword').value='';$('authGate').hidden=true;$('workspaceMain').hidden=false;$('accountInfo').textContent=member.name+' · '+member.role;$('accountInfo').hidden=false;$('logoutButton').hidden=false;controls();void startDetailedMap(requestEpoch);await prepareMap();if(requestEpoch===epoch)await loadShared();}
 async function recheck(){if(!identity||checking)return;const requestEpoch=epoch;checking=true;try{const member=await auth.verify();if(requestEpoch!==epoch)return;if(member.role!==identity.role)screeningPanel.reset();identity=member;setIdentity(member);controls();}catch(e){if(requestEpoch===epoch&&!await failAccess(e))notice('Account access could not be checked. Reconnect before saving.',true);}finally{checking=false;}}
 window.addEventListener('beforeunload',event=>{if(dirty){event.preventDefault();event.returnValue='';}});
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')recheck();});
@@ -70,6 +71,48 @@ function buildIndex(){for(const c of world){for(const n of [c.name,c.iso2,c.iso3
 }
 function offlineMatch(r){if(hasPoint(r))return;const code=getCode(r.country);if(!code)return;const matches=cityIndex.get(code+'|'+norm(r.city))||[];const unique=[...new Map(matches.map(c=>[c[3]+','+c[4],c])).values()];r.candidates=unique.map(c=>({lat:c[3],lon:c[4],label:`${c[0]} · ${c[5]} · region ${c[6]}`,source:'GeoNames cities15000'}));if(unique.length===1)chooseCandidate(r,r.candidates[0]);else if(unique.length>1)r.precision='Ambiguous city';}
 function chooseCandidate(r,c){r.lat=Number(c.lat);r.lon=Number(c.lon);r.precision='Approximate city';r.source=c.source||'OpenStreetMap Nominatim';r.candidates=[];r.warnings=r.warnings.filter(w=>w!=='Invalid coordinates');}
+function linkedDuns() {
+  const match = /^#duns=(\d{9}|\d{2}-\d{3}-\d{4})$/.exec(window.location.hash);
+  return match ? match[1].replaceAll('-', '') : '';
+}
+function openLinkedSupplier() {
+  if (!pendingDuns || !identity || !loaded || loading || detailLoading || screeningState === 'idle') return;
+  const duns = pendingDuns;
+  const matches = rows.filter(row => row.duns.replaceAll('-', '') === duns);
+  if (screeningState === 'scanning' && (!matches.length || matches.some(row => !signalsById.has(row.id)))) return;
+  pendingDuns = '';
+  if (!matches.length) {
+    notice('This DUNS is absent from the shared supplier list.');
+    return;
+  }
+  if (onlyFlagged.checked && matches.some(row => !signalsById.has(row.id))) {
+    onlyFlagged.checked = false;
+    renderTable();
+    renderDots();
+  }
+  const [row] = matches;
+  if (matches.length === 1 && hasPoint(row)) {
+    focusSupplier(row, true);
+    return;
+  }
+  $('search').value = duns;
+  $('countryFilter').value = '';
+  $('statusFilter').value = '';
+  registerPage = 0;
+  renderTable();
+  $('supplierRegister').open = true;
+  $('search').focus?.();
+  notice(matches.length > 1 ? 'Several supplier rows share this DUNS. Select a site in the register.' :
+    'This supplier has no mapped coordinates. Its record is open in the register.');
+}
+window.addEventListener('hashchange', () => {
+  pendingDuns = linkedDuns();
+  if (identity) {
+    closeMapPopup();
+    if (pendingDuns && identity.role === 'owner' && loaded && !loading) screeningPanel.refreshSaved();
+    openLinkedSupplier();
+  }
+});
 function displayRows() {
   return onlyFlagged.checked ? rows.filter(row => signalsById.has(row.id)) : rows;
 }
@@ -133,6 +176,7 @@ function renderTable() {
 }
 function svg(tag,attrs){const e=document.createElementNS(NS,tag);for(const [k,v]of Object.entries(attrs))e.setAttribute(k,v);return e;}
 function closeMapPopup() {
+  linkedPopupRow = null;
   $('mapPopup').hidden=true;
   $('mapPopup').replaceChildren();
 }
@@ -142,12 +186,17 @@ function updateSignals(groups,{state}={state:'idle'}) {
   const changed=groups.length!==signalsById.size || groups.some(group=>signalsById.get(group.supplier.id)!==group.level);
   if (!changed && state===previousState) return;
   if (changed) {
+    const previousLevel = linkedPopupRow && signalsById.get(linkedPopupRow.id);
     signalsById=new Map(groups.filter(group=>group.level==='red'||group.level==='yellow').map(group=>[group.supplier.id,group.level]));
-    closeMapPopup();
+    if (linkedPopupRow && !$('mapPopup').hidden && rows.includes(linkedPopupRow) &&
+        (!onlyFlagged.checked || signalsById.has(linkedPopupRow.id))) {
+      if (previousLevel !== signalsById.get(linkedPopupRow.id)) popup([linkedPopupRow], true);
+    } else closeMapPopup();
   }
   renderTable();
   renderDots();
-  if (onlyFlagged.checked && signalsById.size && previousState==='scanning' && state!=='scanning') fit();
+  if (onlyFlagged.checked && signalsById.size && previousState==='scanning' && state!=='scanning' && !linkedDuns()) fit();
+  openLinkedSupplier();
 }
 function mapDisplayRows() {
   return displayRows().map(row => signalsById.has(row.id) ? {...row, screeningLevel:signalsById.get(row.id)} : row);
@@ -204,8 +253,10 @@ function renderDots() {
     dots.append(pin);
   }
 }
-function focusSupplier(row){if(!hasPoint(row)||(onlyFlagged.checked&&!signalsById.has(row.id)))return;if(detailReady&&detailMap)detailMap.focus(row);else{const p=point(row.lat,row.lon);setView([p.x-22.5,p.y-11.25,45,22.5]);}popup([row]);$('mapwrap').scrollIntoView?.({behavior:'smooth',block:'center'});}
-function popup(members) {
+function focusSupplier(row, linked=false){if(!hasPoint(row)||(onlyFlagged.checked&&!signalsById.has(row.id)))return;pendingDuns='';if(detailReady&&detailMap)detailMap.focus(row);else{const p=point(row.lat,row.lon);setView([p.x-22.5,p.y-11.25,45,22.5]);}popup([row], linked);$('mapwrap').scrollIntoView?.({behavior:'smooth',block:'center'});}
+function popup(members, linked=false) {
+  pendingDuns = '';
+  linkedPopupRow = linked ? members[0] : null;
   const box = $('mapPopup');
   box.replaceChildren();
   const close = el('button','×','close');
@@ -282,13 +333,14 @@ function showDetailedMap(ready){
  $('fallbackAttribution').hidden=ready;
 }
 function stopDetailedMap(){
- mapAttempt++;mapAbort?.abort();mapAbort=null;
+ detailLoading=false;mapAttempt++;mapAbort?.abort();mapAbort=null;
  const previous=detailMap;detailMap=null;try{previous?.destroy();}catch{}
  showDetailedMap(false);
  $('detailMap').replaceChildren();
  $('mapStatus').textContent='';
 }
 async function startDetailedMap(requestEpoch){
+ detailLoading=true;
  const attempt=++mapAttempt;
  mapAbort?.abort();const abort=new AbortController();mapAbort=abort;
  const current=()=>attempt===mapAttempt&&requestEpoch===epoch&&!!identity;
@@ -311,6 +363,8 @@ async function startDetailedMap(requestEpoch){
   $('detailMap').replaceChildren();
   $('mapStatus').textContent='Detailed maps are unavailable. The basic world map still works; reload to retry.';
   $('mapStatus').classList.toggle('map-error',true);
+ } finally {
+  if(current()){detailLoading=false;openLinkedSupplier();}
  }
 }
 
